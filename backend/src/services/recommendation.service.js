@@ -181,8 +181,9 @@ const weeklyBudgetToTier = (amount) => {
   if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0) {
     return "mid";
   }
-  if (amount <= 1500) return "cheap";
-  if (amount <= 6500) return "mid";
+  // Unified thresholds (aligned with mobile onboarding, backend pricing.utils, and AI service)
+  if (amount <= 2000)  return "cheap";
+  if (amount <= 10000) return "mid";
   return "expensive";
 };
 
@@ -298,6 +299,10 @@ const callAiService = async (
                             : {},
       wake_time:          profile?.wakeTime || "",
       sleep_time:         profile?.sleepTime || "",
+      // Persona signals (NEW) — forwarded so the AI service can infer
+      // working-professional vs student / quiet vs social personas.
+      age_group:          profile?.ageGroup || "",
+      location_preference: profile?.locationPreference || "",
       // workingHours is an object ({flexible, morning, afternoon}) — serialize to a
       // plain string so Pydantic Optional[str] validation never rejects with 422.
       working_hours: (() => {
@@ -361,6 +366,10 @@ const callAiService = async (
         religionMatch:  item.religion_match   !== false,
         lifestyleMatch: item.lifestyle_match  === true,
         matchPercent:   typeof item.match_percent === "number" ? item.match_percent : null,
+        // Persona alignment (NEW)
+        personaMatch:   item.persona_match    ?? null,
+        personaScore:   typeof item.persona_score === "number" ? item.persona_score : 0,
+        personaReasons: Array.isArray(item.persona_reasons) ? item.persona_reasons : [],
       });
     }
     logger.debug(`[AI] /predict OK — ${scoreMap.size} scores in ${data.inference_ms}ms (budget=${budgetTier})`);
@@ -402,7 +411,7 @@ const SCORE_CHUNK_SIZE = parseInt(process.env.RECOMMENDATION_SCORE_CHUNK_SIZE ||
 const WEIGHTS = Object.freeze({
   // v4 rules
   routineMatchPerRoutine: 3,
-  budgetMatch:            2,
+  budgetMatch:            5,
   locationMatch:          2,
   typeSaveSignal:         5,
   typeDismissSignal:      -3,
@@ -1007,12 +1016,33 @@ export const scorePlaceForUser = (
     }
   }
 
-  // ── Rule 2: Budget match (+2) ────────────────────────────────────────────────
-  const budgetSignals = new Set();
-  if (profile?.budgetRange) budgetSignals.add(profile.budgetRange);
-  for (const r of routines) { if (r.budgetRange) budgetSignals.add(r.budgetRange); }
-  if (place.priceRange === "free" || budgetSignals.has(place.priceRange)) {
-    breakdown.budgetMatch = WEIGHTS.budgetMatch;
+  // ── Rule 2: Budget match (+5) — uses AI-enriched tier when available ──────────
+  {
+    const userTier  = userBudgetTier(profile); // "cheap" | "mid" | "expensive"
+    const pricingOn = place._pricingEnabled === true;
+    const fastTier  = place._fastPriceLevel;   // set by the pricing pre-pass
+
+    let budgetOk = false;
+    if (!pricingOn || place.priceRange === "free") {
+      // Free / non-priced places always match budget
+      budgetOk = true;
+    } else if (fastTier) {
+      // AI-enriched tier comparison (cheap ≤ mid ≤ expensive)
+      const _order = { cheap: 0, mid: 1, expensive: 2 };
+      const uLevel = _order[userTier] ?? 1;
+      const pLevel = _order[fastTier] ?? 1;
+      budgetOk = pLevel <= uLevel;
+    } else {
+      // Legacy: check budgetRange label from profile/routines
+      const budgetSignals = new Set();
+      if (profile?.budgetRange) budgetSignals.add(profile.budgetRange);
+      for (const r of routines) { if (r.budgetRange) budgetSignals.add(r.budgetRange); }
+      budgetOk = budgetSignals.has(place.priceRange);
+    }
+
+    if (budgetOk) {
+      breakdown.budgetMatch = WEIGHTS.budgetMatch;
+    }
   }
 
   // ── Rule 3: Location preference match (+2) ───────────────────────────────────
@@ -2077,6 +2107,9 @@ export const getRecommendations = async (
               religion:  enrichment.religionMatch  ?? entry.matches?.religion  ?? true,
               lifestyle: enrichment.lifestyleMatch ?? entry.matches?.lifestyle ?? false,
             };
+            // Persona alignment
+            if (enrichment.personaMatch) entry.personaMatch = enrichment.personaMatch;
+            if (enrichment.personaReasons?.length) entry.personaReasons = enrichment.personaReasons;
             if (enrichment.matchPercent != null) entry.matchPercent = enrichment.matchPercent;
           } else {
             entry.priceLevel = enrichment.priceLevel ?? entry.priceLevel;
@@ -2088,6 +2121,9 @@ export const getRecommendations = async (
               entry.priceSignals = enrichment.priceSignals;
             }
             if (enrichment.reason) entry.reason = enrichment.reason;
+            // Persona alignment
+            if (enrichment.personaMatch) entry.personaMatch = enrichment.personaMatch;
+            if (enrichment.personaReasons?.length) entry.personaReasons = enrichment.personaReasons;
             entry.matches = {
               budget:    tierToNumber(entry.priceLevel || "mid") <= _userBudgetLevel,
               religion:  enrichment.religionMatch  ?? entry.matches?.religion  ?? true,
@@ -2117,15 +2153,19 @@ export const getRecommendations = async (
 
   // ── Phase 2b: Strict budget filter ────────────────────────────────────────
   // Hard rule: never surface places priced above the user's budget tier.
-  //   cheap  → only cheap
-  //   mid    → cheap + mid
-  //   expensive → all
-  // We only apply this when the user has a budget set (not cold-start).
+  //   cheap     → only cheap places
+  //   mid       → cheap + mid places
+  //   expensive → all tiers allowed
+  // Only applied when the user has set a budget (not cold-start).
+  // Uses AI-enriched priceLevel when available; falls back to _fastPriceLevel
+  // (heuristic) set during the pricing pre-pass so the filter works even in fast mode.
   const hasBudget = Boolean(profile?.weeklyBudget || profile?.budgetRange);
   const withoutDismissed = hasBudget
     ? _afterDismissed.filter((p) => {
         if (!p.pricingEnabled) return true;
-        const pLevel = tierToNumber(p.priceLevel || "mid");
+        // Prefer AI-enriched level; fall back to fast heuristic
+        const effectiveTier = p.priceLevel || p._fastPriceLevel || "mid";
+        const pLevel = tierToNumber(effectiveTier);
         return pLevel <= _userBudgetLevel;
       })
     : _afterDismissed;

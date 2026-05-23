@@ -146,10 +146,10 @@ def budget_amount_to_tier(weekly_budget_etb: float | int | None) -> str:
     """
     Converts a numeric weekly outing budget (ETB) to a 3-tier label.
 
-    Heuristic mapping based on typical Addis Ababa lifestyles:
-      <= 1500   → cheap        (Mercato / local kibat)
-      <= 6500   → mid          (Bole café / mid-range restaurant)
-      else      → expensive    (Skylight / Hyatt / Sheraton tier)
+    Unified thresholds (aligned with mobile onboarding and backend):
+      1 – 2,000   → cheap       (Mercato / local kibat / neighborhood cafes)
+      2,001 – 10,000 → mid      (Bole cafes, mid-range restaurants)
+      > 10,000    → expensive   (Skylight / Hyatt / Sheraton tier)
     """
     if weekly_budget_etb is None:
         return "mid"
@@ -159,9 +159,9 @@ def budget_amount_to_tier(weekly_budget_etb: float | int | None) -> str:
         return "mid"
     if amt <= 0:
         return "mid"
-    if amt <= 1500:
+    if amt <= 2000:
         return "cheap"
-    if amt <= 6500:
+    if amt <= 10000:
         return "mid"
     return "expensive"
 

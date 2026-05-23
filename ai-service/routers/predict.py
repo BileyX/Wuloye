@@ -44,6 +44,12 @@ from learning.realtime import (
     generate_explanation as pref_generate_explanation,
 )
 from denomination.classifier import classify as denom_classify
+from persona import (
+    infer_user_persona,
+    classify_place_persona,
+    persona_alignment_score,
+    persona_match_label,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -142,6 +148,9 @@ class ContextIn(BaseModel):
     # working_hours may arrive as a string ("flexible", "09:00-17:00") or as the
     # raw JS object from the profile doc — accept both and normalise to str.
     working_hours:      Optional[Union[str, dict]] = ""
+    # Persona signals (new) — forwarded from backend, used by persona alignment
+    age_group:          Optional[str]              = ""    # "18-24" | "25-34" | "35-44" | …
+    location_preference: Optional[str]             = ""    # "indoor" | "outdoor" | "any"
     # Extra pass-through fields from backend (ignored by scoring logic)
     discover_category:  Optional[str]              = None
     # Display
@@ -180,6 +189,10 @@ class RankedPlace(BaseModel):
     budget_fit:      bool = True
     religion_match:  bool = True
     lifestyle_match: bool = False
+    # Persona alignment (NEW) — student/professional/quiet/social fit
+    persona_match:    Optional[str]   = None   # short label or "" if neutral
+    persona_score:    Optional[float] = None   # signed adjustment in [-0.5, +0.18]
+    persona_reasons:  list[str]       = Field(default_factory=list)
     # Denomination classification (for religious venues)
     denomination_type:       Optional[str]   = None  # "orthodox"|"protestant"|"catholic"|"muslim"|"christian"
     denomination_confidence: Optional[float] = None  # 0.0–1.0
@@ -210,7 +223,14 @@ def _resolve_budget_tier(ctx: ContextIn) -> str:
 def _budget_fit_score(user_tier: str, place_tier: str) -> tuple[float, bool]:
     """
     Returns (score_adjustment, strictly_in_budget_flag).
-    Same tier → +0.06 boost.  One tier above → −0.10 penalty.  Two tiers above → −0.30 penalty.
+
+    Tier order: cheap(0) < mid(1) < expensive(2)
+    diff = place_tier_index − user_tier_index
+
+    diff ≤ 0  → affordable or same tier   → +0.08 boost
+    diff == 1 → one tier above budget      → −0.20 penalty
+    diff == 2 → two tiers above (luxury
+                for a cheap user)          → −0.50 penalty (near-block)
     """
     if not place_tier or not user_tier:
         return 0.0, True
@@ -219,10 +239,10 @@ def _budget_fit_score(user_tier: str, place_tier: str) -> tuple[float, bool]:
     b = order.get(place_tier, 1)
     diff = b - a  # positive = place is more expensive than user can afford
     if diff <= 0:
-        return 0.06, True     # same tier or cheaper → positive fit signal
+        return 0.08, True     # same tier or cheaper → positive fit signal
     if diff == 1:
-        return -0.10, False   # one tier above → noticeable penalty
-    return -0.30, False       # two tiers above (cheap user at luxury) → strong penalty
+        return -0.20, False   # one tier above → strong penalty
+    return -0.50, False       # two tiers above (cheap user at luxury) → near-block
 
 
 def _get_place_religion(place_text: str, ptype: str) -> str:
@@ -422,6 +442,7 @@ def _score_candidate(
     seq_dist:          dict[str, float],
     interaction_types: list[str],
     user_budget_tier:  str,
+    user_persona     = None,  # UserPersona | None — passed from predict()
 ) -> RankedPlace:
     """
     Full onboarding-driven + adaptive scoring pipeline.
@@ -489,10 +510,27 @@ def _score_candidate(
         pricing_on = bool(enrichment.get("pricing_enabled"))
         place_tier = enrichment.get("priceLevel") or "mid"
 
-        # ── 6. Budget-fit scoring ───────────────────────────────────────────
+        # ── 6. Budget-fit scoring + HARD CAPS ──────────────────────────────
         if pricing_on:
             budget_adj, in_budget = _budget_fit_score(user_budget_tier, place_tier)
             ai += budget_adj
+
+            # Hard caps: cheap users must never receive high AI scores for
+            # luxury/expensive places — this prevents over-budget places from
+            # appearing near the top even after other boosts.
+            _order = {"cheap": 0, "mid": 1, "expensive": 2}
+            _u = _order.get(user_budget_tier, 1)
+            _p = _order.get(place_tier, 1)
+            if _u == 0 and _p == 2:
+                # cheap user + expensive place → hard-cap at 0.12
+                ai = min(ai, 0.12)
+            elif _u == 0 and _p == 1:
+                # cheap user + mid place → cap at 0.45 (below average)
+                ai = min(ai, 0.45)
+            elif _u == 1 and _p == 2:
+                # mid user + expensive place → cap at 0.55
+                ai = min(ai, 0.55)
+
             in_budget_final = in_budget
         else:
             in_budget_final = True
@@ -538,6 +576,29 @@ def _score_candidate(
         lifestyle_match_flag = lifestyle_adj > 0.0
         ai = min(1.0, ai + lifestyle_adj)
 
+        # ── 8b. Persona alignment (NEW) ─────────────────────────────────────
+        # Classify the candidate's lifestyle persona (student/professional/
+        # quiet/social/etc.) and compare it against the user's inferred
+        # persona. This prevents "student cafe spam for working professionals"
+        # and similar contradictions.
+        persona_score_adj = 0.0
+        persona_reasons:   list[str] = []
+        persona_label:     str = ""
+        try:
+            place_persona = classify_place_persona(place_dict)
+            if user_persona is not None:
+                persona_score_adj, persona_reasons = persona_alignment_score(user_persona, place_persona)
+                persona_label = persona_match_label(user_persona, place_persona)
+                ai = max(0.0, min(1.0, ai + persona_score_adj))
+
+                # Hard suppression: a strong persona contradiction (-0.30 or
+                # lower) means the place fundamentally doesn't fit the user.
+                # Cap the score so it can't surface near the top.
+                if persona_score_adj <= -0.30:
+                    ai = min(ai, 0.25)
+        except Exception as exc:
+            logger.debug("[predict] persona alignment failed: %s", exc)
+
         # ── 9. Gender context scoring ───────────────────────────────────────
         gender_adj = _gender_score(candidate, context.gender or "")
         ai = max(0.0, ai + gender_adj)
@@ -580,35 +641,59 @@ def _score_candidate(
             ai_score        = ai,
         )
 
-        # ── 14. Explanation: preference vector first, LLM fallback ──────────
+        # ── 14. Explanation: always generated — preference vector first, LLM fallback ─
         reason: Optional[str] = None
-        if context.explain:
-            # Try fast preference-vector based explanation first
-            reason = pref_generate_explanation(user_id, ptype)
+        # Always build user_signals so the template/LLM has full context
+        top_cats = get_top_categories(user_id, 3)
+        user_signals = {
+            "budget":             user_budget_tier,
+            "budgetRange":        user_budget_tier,  # alias
+            "interests":          context.interests or [c for c, _ in top_cats],
+            "weeklyActivities":   context.weekly_activities or [],
+            "weekendPreference":  context.weekend_preference or "",
+            "religion":           context.religion or "",
+            "gender":             context.gender or "",
+            "session_intent":     context.session_intent or "",
+            "time_of_day":        context.time_of_day or "",
+            "wake_time":          context.wake_time or "",
+            "sleep_time":         context.sleep_time or "",
+            "top_categories":     [c for c, _ in top_cats],
+            "budget_fit":         in_budget_final,
+            # Persona context for the LLM and template
+            "persona":            user_persona.to_dict() if user_persona else None,
+            "persona_reasons":    persona_reasons,
+        }
+        place_for_llm = {
+            **place_dict,
+            "pricing_enabled": pricing_on,
+            "priceLevel":     enrichment.get("priceLevel"),
+            "estimatedCost":  enrichment["estimatedCost"] if pricing_on else {},
+            "highlights":     enrichment.get("priceSignals", []),
+        }
 
-            # Fallback: generate from onboarding signals via LLM/template
+        # Prefer a behavioural explanation when the user has interaction
+        # history; otherwise generate from onboarding + persona signals.
+        if context.explain:
+            reason = pref_generate_explanation(user_id, ptype)
             if not reason:
-                top_cats = get_top_categories(user_id, 3)
-                user_signals = {
-                    "budget":             user_budget_tier,
-                    "interests":          context.interests or [c for c, _ in top_cats],
-                    "weeklyActivities":   context.weekly_activities or [],
-                    "weekendPreference":  context.weekend_preference or "",
-                    "religion":           context.religion or "",
-                    "gender":             context.gender or "",
-                    "session_intent":     context.session_intent or "",
-                    "time_of_day":        context.time_of_day or "",
-                    "wake_time":          context.wake_time or "",
-                    "sleep_time":         context.sleep_time or "",
-                    "top_categories":     [c for c, _ in top_cats],
-                }
-                place_for_llm = {
-                    **place_dict,
-                    "pricing_enabled": pricing_on,
-                    "priceLevel":     enrichment.get("priceLevel"),
-                    "estimatedCost":  enrichment["estimatedCost"] if pricing_on else {},
-                }
                 reason = generate_recommendation_reason(user_signals, place_for_llm, max_chars=180)
+        else:
+            # Always generate a template reason even when explain=False
+            # so the mobile detail page always has a personalised summary.
+            from llm.openai_client import _template_reason
+            reason = _template_reason(user_signals, place_for_llm)[:180]
+
+        # If we have strong persona reasons, prepend the first one to the
+        # explanation so the user sees "matches your professional vibe …"
+        if persona_reasons and reason and persona_score_adj > 0.05:
+            primary = persona_reasons[0]
+            if primary and primary.lower() not in reason.lower():
+                reason = f"{primary.capitalize()} — {reason}"
+                reason = reason[:200]
+        elif persona_score_adj < -0.10 and persona_reasons:
+            warn = persona_reasons[0]
+            if warn and warn.lower() not in (reason or "").lower():
+                reason = f"{(reason or '').rstrip('. ')}. Note: {warn}."[:200]
 
         return RankedPlace(
             place_id         = candidate.place_id,
@@ -628,6 +713,9 @@ def _score_candidate(
             budget_fit       = in_budget_final,
             religion_match   = religion_match_flag,
             lifestyle_match  = lifestyle_match_flag,
+            persona_match    = persona_label or None,
+            persona_score    = round(persona_score_adj, 4) if persona_score_adj else 0.0,
+            persona_reasons  = persona_reasons,
             denomination_type        = denom_type if denom_result.is_religious else None,
             denomination_confidence  = round(denom_confidence, 3) if denom_result.is_religious else None,
         )
@@ -670,9 +758,19 @@ def predict(req: PredictRequest) -> PredictResponse:
     seq_dist     = seq_model.predict_distribution(recent_types)
     interaction_types = recent_types
 
+    # ── Persona inference (NEW) — done once per request ─────────────────────
+    # Blends onboarding signals with the learned preference vector so the
+    # persona evolves over time as the user interacts with the app.
+    learned_top = get_top_categories(req.user_id, 5)
+    user_persona = infer_user_persona(
+        profile = ctx.model_dump(),
+        learned_top_categories = learned_top,
+    )
+
     results = [
         _score_candidate(
             req.user_id, cand, ctx, seq_dist, interaction_types, user_budget_tier,
+            user_persona = user_persona,
         )
         for cand in req.candidates
     ]

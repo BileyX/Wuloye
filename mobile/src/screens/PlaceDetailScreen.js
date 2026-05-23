@@ -28,6 +28,7 @@ import { fetchPlaceDetails } from "../api/placeApi";
 import PlaceInteractionBar from "../components/PlaceInteractionBar";
 import { usePlaceInteractions } from "../hooks/usePlaceInteractions";
 import { getDenominationDisplay } from "../utils/denominationDisplay";
+import { safeGoBack } from "../utils/navigationHelpers";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 
@@ -553,8 +554,27 @@ function MatchScoreBanner({ place, palette, isDark, styles }) {
         "#6366F1";
 
     const budgetMatch   = place?.matches?.budget === true   || place?.budgetFit === true;
+    const budgetMismatch = place?.pricingEnabled && place?.matches?.budget === false;
     const religionMatch = place?.matches?.religion === true;
     const hasDistance   = Boolean(place?.distance);
+    const priceTier     = (place?.priceLevel || "").toLowerCase();
+    const lifestyleMatch = place?.matches?.lifestyle === true;
+    const personaMatch  = place?.personaMatch || null;
+    const personaPositive = personaMatch && /^(strong|matches)/i.test(personaMatch);
+    const personaNegative = personaMatch && /(mismatch|doesn'?t match)/i.test(personaMatch);
+
+    // Human-readable budget chip label based on user's price level
+    const budgetChipLabel = (() => {
+        if (!place?.pricingEnabled) return "Free venue";
+        if (budgetMismatch) {
+            if (priceTier === "expensive") return "Above budget";
+            return "Over budget";
+        }
+        if (priceTier === "cheap")     return "Affordable";
+        if (priceTier === "mid")       return "Within budget";
+        if (priceTier === "expensive") return "Premium";
+        return "Matches budget";
+    })();
 
     const { label: denomLabel, color: denomColor } = getDenominationDisplay(place);
 
@@ -578,10 +598,42 @@ function MatchScoreBanner({ place, palette, isDark, styles }) {
                     AI match score
                 </Text>
                 <View style={styles.matchBannerChips}>
-                    {budgetMatch && (
-                        <View style={[styles.matchChip, { backgroundColor: "rgba(16,185,129,0.12)", borderColor: "rgba(16,185,129,0.35)" }]}>
-                            <Ionicons name="checkmark-circle" size={10} color="#059669" />
-                            <Text style={[styles.matchChipText, { color: "#059669" }]}>Budget</Text>
+                    {/* Budget chip — always shown when pricing is relevant */}
+                    {(budgetMatch || budgetMismatch) && (
+                        <View style={[
+                            styles.matchChip,
+                            budgetMismatch
+                                ? { backgroundColor: "rgba(239,68,68,0.12)", borderColor: "rgba(239,68,68,0.35)" }
+                                : { backgroundColor: "rgba(16,185,129,0.12)", borderColor: "rgba(16,185,129,0.35)" },
+                        ]}>
+                            <Ionicons
+                                name={budgetMismatch ? "warning-outline" : "checkmark-circle"}
+                                size={10}
+                                color={budgetMismatch ? "#EF4444" : "#059669"}
+                            />
+                            <Text style={[styles.matchChipText, { color: budgetMismatch ? "#EF4444" : "#059669" }]}>
+                                {budgetChipLabel}
+                            </Text>
+                        </View>
+                    )}
+                    {/* Lifestyle chip */}
+                    {lifestyleMatch && (
+                        <View style={[styles.matchChip, { backgroundColor: "rgba(245,158,11,0.12)", borderColor: "rgba(245,158,11,0.35)" }]}>
+                            <Ionicons name="heart-circle-outline" size={10} color="#D97706" />
+                            <Text style={[styles.matchChipText, { color: "#D97706" }]}>Your style</Text>
+                        </View>
+                    )}
+                    {/* Persona match chip — only when meaningfully positive or negative */}
+                    {personaPositive && (
+                        <View style={[styles.matchChip, { backgroundColor: "rgba(99,102,241,0.12)", borderColor: "rgba(99,102,241,0.35)" }]}>
+                            <Ionicons name="sparkles-outline" size={10} color="#6366F1" />
+                            <Text style={[styles.matchChipText, { color: "#6366F1" }]}>{personaMatch}</Text>
+                        </View>
+                    )}
+                    {personaNegative && (
+                        <View style={[styles.matchChip, { backgroundColor: "rgba(239,68,68,0.10)", borderColor: "rgba(239,68,68,0.30)" }]}>
+                            <Ionicons name="alert-circle-outline" size={10} color="#EF4444" />
+                            <Text style={[styles.matchChipText, { color: "#EF4444" }]}>{personaMatch}</Text>
                         </View>
                     )}
                     {denomLabel ? (
@@ -673,7 +725,13 @@ function OverviewTab({ place, palette, isDark, styles }) {
                         {!budgetMatch ? (
                             <View style={[styles.priceTierPill, { backgroundColor: "#ff4d4d22", borderColor: "#ff4d4d55" }]}>
                                 <Text style={[styles.priceTierPillText, { color: "#e03030" }]}>
-                                    Above budget
+                                    Above your budget
+                                </Text>
+                            </View>
+                        ) : priceTier ? (
+                            <View style={[styles.priceTierPill, { backgroundColor: "#10b98122", borderColor: "#10b98155" }]}>
+                                <Text style={[styles.priceTierPillText, { color: "#059669" }]}>
+                                    {priceTier === "cheap" ? "Affordable" : priceTier === "mid" ? "Matches your budget" : "Premium"}
                                 </Text>
                             </View>
                         ) : null}
@@ -1268,12 +1326,16 @@ export default function PlaceDetailScreen({ navigation, route }) {
 
     const bottomPad = Math.max(insets.bottom, 12) + 8;
 
+    const leaveDetail = useCallback(() => safeGoBack(navigation), [navigation]);
+
     const interactions = usePlaceInteractions(place, {
         source: "place_detail",
-        onAfterNegative: () => navigation.goBack(),
+        onAfterNegative: leaveDetail,
     });
 
-    // Log view on open; long view when leaving after 5+ seconds
+    // Log view on open; long-view if user stayed >5s, or quick_exit if <3s.
+    // Engagement tracking feeds the bandit + preference vector so the AI
+    // learns from real attention, not just clicks.
     useEffect(() => {
         const pid = place?.placeId ?? place?.id;
         if (!pid) return undefined;
@@ -1285,13 +1347,35 @@ export default function PlaceDetailScreen({ navigation, route }) {
         }).catch(() => null);
         return () => {
             const secs = (Date.now() - openedAtRef.current) / 1000;
-            if (secs >= 5) {
+            if (secs >= 15) {
+                // Very engaged — counts as a strong positive
                 createInteraction({
                     placeId: pid,
                     actionType: INTERACTION_TYPES.VIEW_LONG,
                     metadata: {
                         source: "place_detail",
                         durationSec: Math.round(secs),
+                        engagement: "high",
+                    },
+                }).catch(() => null);
+            } else if (secs >= 5) {
+                createInteraction({
+                    placeId: pid,
+                    actionType: INTERACTION_TYPES.VIEW_LONG,
+                    metadata: {
+                        source: "place_detail",
+                        durationSec: Math.round(secs),
+                        engagement: "medium",
+                    },
+                }).catch(() => null);
+            } else if (secs < 3) {
+                // Quick exit — user wasn't interested
+                createInteraction({
+                    placeId: pid,
+                    actionType: INTERACTION_TYPES.QUICK_EXIT,
+                    metadata: {
+                        source: "place_detail",
+                        durationSec: Math.round(secs * 10) / 10,
                     },
                 }).catch(() => null);
             }
@@ -1338,7 +1422,7 @@ export default function PlaceDetailScreen({ navigation, route }) {
 
     async function handleDislike() {
         if (isDisliked) {
-            navigation.goBack();
+            leaveDetail();
             return;
         }
         setIsDisliked(true);
@@ -1400,7 +1484,7 @@ export default function PlaceDetailScreen({ navigation, route }) {
                 <ImageCarousel
                     place={place}
                     isDark={isDark}
-                    onBack={() => navigation.goBack()}
+                    onBack={leaveDetail}
                     onSave={handleCarouselSave}
                     isSaved={isSaved}
                 />

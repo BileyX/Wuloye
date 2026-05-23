@@ -64,26 +64,33 @@ const experimentStampForUser = (userId) => {
 export const ACTION_SCORES = Object.freeze({
   // ── Neutral / passive ──────────────────────────────────────────────────────
   view:             1,   // short passive view
-  view_long:        6,   // spent meaningful time on detail page (+6)
+  view_long:        8,   // long detail-page stay — STRONG signal (was 6)
   // ── Navigation intent ──────────────────────────────────────────────────────
-  click:            2,   // tapped to open (open details)
-  directions:       7,   // opened directions — very strong intent
-  call:             5,   // tapped to call the place
-  share:            5,   // shared recommendation
+  click:            3,   // tapped to open details (was 2)
+  directions:       9,   // opened directions — very strong intent (was 7)
+  call:             6,   // tapped to call the place (was 5)
+  share:            6,   // shared recommendation (was 5)
   // ── Affinity ───────────────────────────────────────────────────────────────
-  like:             5,   // explicit like
-  save:             8,   // saved to favourites (strong positive)
-  mark_interested:  4,   // marked as interested
-  revisit:         10,   // returned to a place they already visited
+  like:             7,   // explicit like (was 5)
+  save:            10,   // saved to favourites — STRONGEST taste signal (was 8)
+  mark_interested:  5,   // marked as interested (was 4)
+  revisit:         12,   // returned to a place — highest signal (was 10)
   // ── Event specific ─────────────────────────────────────────────────────────
   open_event:       3,   // opened event detail
-  join_event:       9,   // joined / RSVP'd an event
+  join_event:      10,   // joined / RSVP'd an event (was 9)
+  // ── Explicit feedback (NEW — direct user ratings) ─────────────────────────
+  feedback_excellent:     12,
+  feedback_good:           6,
+  feedback_neutral:        0,
+  feedback_poor:          -8,
+  feedback_not_relevant: -12,
   // ── Negative signals ───────────────────────────────────────────────────────
-  dislike:         -8,   // explicit dislike
-  dismiss:         -6,   // swiped away
-  skip:            -5,   // skipped in feed (repeated skips compound)
-  not_interested:  -8,   // explicit "not for me"
-  remove_save:     -3,   // unsaved a previously saved place
+  dislike:        -10,   // explicit dislike (was -8)
+  dismiss:         -7,   // swiped away (was -6)
+  skip:            -6,   // skipped in feed (was -5)
+  not_interested: -12,   // explicit "not for me" — STRONG block signal (was -8)
+  remove_save:     -4,   // unsaved a previously saved place (was -3)
+  quick_exit:      -5,   // opened detail but left in <3s (NEW)
   // ── Implicit / behavioural ─────────────────────────────────────────────────
   search:           1,   // searched for a term
   filter_use:       1,   // used a filter

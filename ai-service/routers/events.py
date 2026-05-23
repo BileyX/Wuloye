@@ -238,10 +238,12 @@ def _parse_etb_price(ticket_price: str) -> float | None:
 
 def _budget_event_score(user_budget_tier: str, event: EventCandidate) -> float:
     """
-    Returns a score adjustment for budget fit. Budget tiers:
-      cheap     → ≤ ETB 500 free/cheap events strongly preferred; expensive = hard block
-      mid       → ETB 500–2500 comfortable; expensive = soft penalty
-      expensive → no restrictions
+    Returns a score adjustment for budget fit.
+
+    Thresholds aligned with unified weekly budget tiers:
+      cheap     (≤ 2,000 ETB/wk) → free events strongly preferred; expensive = hard block
+      mid       (2,001–10,000 ETB/wk) → ETB 0–3000 fine; above ETB 5000 = penalty
+      expensive (> 10,000 ETB/wk) → no hard restrictions
     """
     if not user_budget_tier:
         return 0.0
@@ -251,42 +253,48 @@ def _budget_event_score(user_budget_tier: str, event: EventCandidate) -> float:
 
     if user_budget_tier == "cheap":
         if is_free:
-            return 0.10  # strong boost for free events
+            return 0.12   # strong boost for free events
         if etb is not None:
-            if etb <= 300:
-                return 0.07
-            if etb <= 800:
-                return 0.00
+            if etb <= 200:
+                return 0.08   # very cheap ticket
+            if etb <= 500:
+                return 0.04
+            if etb <= 1000:
+                return -0.08
             if etb <= 2500:
-                return -0.15
-            return -0.40   # hard block: luxury for cheap user
-        # No price info — infer from tier
+                return -0.25  # too expensive for cheap user
+            return -0.50      # hard near-block: luxury event for cheap user
+        # No numeric price — fall back to price_tier label
         event_tier = (event.price_tier or "mid").lower()
         if event_tier == "cheap":
-            return 0.05
+            return 0.06
         if event_tier == "mid":
-            return -0.08
-        return -0.35       # expensive tier for cheap user
+            return -0.12
+        return -0.40          # expensive tier for cheap user
 
     if user_budget_tier == "mid":
         if is_free:
-            return 0.05
+            return 0.06
         if etb is not None:
-            if etb <= 2500:
-                return 0.04
-            if etb <= 6000:
-                return -0.08
-            return -0.20   # very expensive for mid user
+            if etb <= 1000:
+                return 0.06
+            if etb <= 3000:
+                return 0.03
+            if etb <= 5000:
+                return -0.05
+            if etb <= 8000:
+                return -0.12
+            return -0.25      # very expensive for mid user
         event_tier = (event.price_tier or "mid").lower()
         if event_tier == "cheap":
-            return 0.04
+            return 0.06
         if event_tier == "mid":
-            return 0.02
-        return -0.12
+            return 0.03
+        return -0.15          # expensive tier for mid user
 
     # expensive budget — accept everything, small boost for paid premium
     if event.is_paid and (event.price_tier or "").lower() == "expensive":
-        return 0.04
+        return 0.05
     return 0.02
 
 
@@ -432,15 +440,25 @@ def _score_event(
         else:
             budget_tier = "expensive"
     bud_adj = _budget_event_score(budget_tier, event)
-    if bud_adj <= -0.30:
+    if bud_adj <= -0.35:
         reasons.append("over budget")
     elif bud_adj <= -0.08:
         reasons.append("may be over budget")
     elif bud_adj >= 0.06 and not event.is_paid:
         reasons.append("free to attend")
-    elif bud_adj >= 0.04:
+    elif bud_adj >= 0.03:
         reasons.append("within your budget")
     score = max(0.0, min(1.0, score + bud_adj))
+
+    # Hard caps: cheap users must never receive high scores for expensive events
+    _budget_order = {"cheap": 0, "mid": 1, "expensive": 2}
+    _u_level = _budget_order.get(budget_tier, 1)
+    _e_tier  = (event.price_tier or "mid").lower()
+    _e_level = _budget_order.get(_e_tier, 1)
+    if _u_level == 0 and _e_level == 2:
+        score = min(score, 0.10)
+    elif _u_level == 0 and _e_level == 1 and event.is_paid:
+        score = min(score, 0.40)
 
     # 8. Gender context
     gender_adj = _gender_event_score(profile.gender, text)
