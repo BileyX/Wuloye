@@ -39,43 +39,54 @@ logger = logging.getLogger(__name__)
 # are handled in the update() method via the `_BETA_BUMP` map below.
 
 _REWARD_DELTAS: dict[str, float] = {
-    # Passive
+    # ── Passive ───────────────────────────────────────────────────────────────
     "view":             0.5,
-    "view_long":        2.5,
-    # Navigation intent
-    "click":            1.0,
-    "directions":       3.0,
-    "call":             2.0,
-    "share":            2.0,
-    # Affinity
-    "like":             2.0,
-    "save":             4.0,
-    "mark_interested":  1.5,
-    "revisit":          5.0,
-    # Events
-    "open_event":       1.0,
-    "join_event":       4.5,
-    # Completions
-    "schedule_complete": 4.0,
-    "activity_complete": 4.0,
-    # Negative (α delta ignored, β handled separately)
+    "view_long":        3.5,    # was 2.5 — long detail-page stays are strong signal
+    # ── Navigation intent ─────────────────────────────────────────────────────
+    "click":            1.2,    # was 1.0
+    "directions":       4.0,    # was 3.0 — opening directions = high intent
+    "call":             2.5,    # was 2.0
+    "share":            2.5,    # was 2.0
+    # ── Affinity ──────────────────────────────────────────────────────────────
+    "like":             3.0,    # was 2.0
+    "save":             5.5,    # was 4.0 — saves are the strongest taste signal
+    "mark_interested":  2.0,    # was 1.5
+    "revisit":          6.5,    # was 5.0 — repeat visit is the highest signal
+    # ── Events ────────────────────────────────────────────────────────────────
+    "open_event":       1.2,
+    "join_event":       5.5,    # was 4.5
+    # ── Completions ───────────────────────────────────────────────────────────
+    "schedule_complete": 5.0,   # was 4.0
+    "activity_complete": 5.0,   # was 4.0
+    # ── Explicit feedback (NEW) — direct user rating signals ─────────────────
+    "feedback_excellent": 7.0,
+    "feedback_good":      3.0,
+    "feedback_neutral":   0.0,
+    # ── Negative (α delta ignored, β handled separately) ──────────────────────
     "dislike":          0.0,
     "dismiss":          0.0,
     "skip":             0.0,
     "not_interested":   0.0,
     "remove_save":      0.0,
-    # Neutral
+    "feedback_poor":         0.0,
+    "feedback_not_relevant": 0.0,
+    "quick_exit":            0.0,
+    # ── Neutral ───────────────────────────────────────────────────────────────
     "search":           0.0,
     "filter_use":       0.0,
 }
 
 # How much to bump β for negative signals.
+# Larger β = arm gets ranked lower for this user, faster.
 _BETA_BUMPS: dict[str, float] = {
-    "dismiss":        1.0,
-    "dislike":        2.0,
-    "skip":           0.7,
-    "not_interested": 2.0,
-    "remove_save":    0.5,
+    "dismiss":         1.5,    # was 1.0
+    "dislike":         3.0,    # was 2.0 — explicit dislike trains hard
+    "skip":            1.0,    # was 0.7
+    "not_interested":  3.5,    # was 2.0 — strongest "stop showing me this" signal
+    "remove_save":     1.0,    # was 0.5
+    "quick_exit":      0.8,    # NEW — opened detail but left in <3s
+    "feedback_poor":         2.5,
+    "feedback_not_relevant": 4.0,
 }
 
 # ─── Types ────────────────────────────────────────────────────────────────────

@@ -35,11 +35,12 @@ logger = logging.getLogger(__name__)
 
 # ─── Configuration (read once) ────────────────────────────────────────────────
 
-_MODEL          = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
-_TIMEOUT_S      = float(os.getenv("OPENAI_LLM_TIMEOUT_S", "4.0"))
-_CACHE_TTL_SEC  = int(os.getenv("LLM_REASON_CACHE_TTL_SEC", "3600"))
-_MAX_TOKENS     = int(os.getenv("OPENAI_LLM_MAX_TOKENS", "120"))
-_MAX_PRICING_TOKENS = int(os.getenv("OPENAI_PRICING_LLM_MAX_TOKENS", "200"))
+_MODEL               = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
+_TIMEOUT_S           = float(os.getenv("OPENAI_LLM_TIMEOUT_S", "4.0"))
+_CACHE_TTL_SEC       = int(os.getenv("LLM_REASON_CACHE_TTL_SEC", "3600"))
+_MAX_TOKENS          = int(os.getenv("OPENAI_LLM_MAX_TOKENS", "120"))
+_MAX_PRICING_TOKENS  = int(os.getenv("OPENAI_PRICING_LLM_MAX_TOKENS", "200"))
+_TEMPERATURE         = float(os.getenv("OPENAI_LLM_TEMPERATURE", "0.4"))
 _PRICING_LLM_TEMP    = float(os.getenv("OPENAI_PRICING_LLM_TEMPERATURE", "0.2"))
 
 # ─── Lazy client ──────────────────────────────────────────────────────────────
@@ -101,54 +102,80 @@ def _hash_key(payload: dict[str, Any]) -> str:
 
 # ─── Template fallbacks (used when LLM disabled / fails) ──────────────────────
 
+_BUDGET_LABEL: dict[str, str] = {
+    "cheap":     "budget-friendly",
+    "mid":       "mid-range",
+    "expensive": "premium",
+}
+_PRICE_LABEL: dict[str, str] = {
+    "cheap":     "affordable",
+    "mid":       "mid-range priced",
+    "expensive": "premium priced",
+}
+
+
 def _template_reason(user_signals: dict[str, Any], place: dict[str, Any]) -> str:
     """Deterministic explanation that uses available data only — no LLM."""
     name        = place.get("name") or "this place"
     p_type      = (place.get("type") or place.get("category") or "spot").lower()
-    if place.get("pricing_enabled") is False:
-        intent = (user_signals.get("session_intent") or "").lower()
-        if intent and intent != "explore":
-            base = f"Matches your {intent} mood; a notable {p_type} for you."
-        else:
-            base = f"A {p_type} worth visiting that fits how you browse the city."
-        return f"{base} {name.capitalize()}.".strip()
-    price_level = place.get("priceLevel") or "mid"
+    pricing_on  = place.get("pricing_enabled") is not False
+    price_level = (place.get("priceLevel") or "mid").lower()
     weekend     = (user_signals.get("weekendPreference") or "").lower()
     intent      = (user_signals.get("session_intent") or "").lower()
     interests   = user_signals.get("interests") or []
     budget      = (user_signals.get("budget") or user_signals.get("budgetRange") or "").lower()
 
+    if not pricing_on:
+        intent_bit = f"for your {intent} mood" if intent and intent != "explore" else "worth visiting"
+        return f"A {p_type} {intent_bit} — no entry cost required. {name.capitalize()} is a free venue."
+
     bits: list[str] = []
 
+    # Core activity / mood signal
     if intent and intent != "explore":
-        bits.append(f"matches your {intent} mood")
+        bits.append(f"fits your {intent} mood")
     elif p_type in ("gym", "yoga", "fitness"):
-        bits.append("good for an active session")
-    elif p_type in ("coffee", "cafe", "restaurant"):
-        bits.append("a solid spot for food or coffee")
+        bits.append("great for staying active")
+    elif p_type in ("coffee", "cafe"):
+        bits.append("a solid café pick")
+    elif p_type == "restaurant":
+        bits.append("a good dining option")
     else:
-        bits.append(f"a {p_type} you might enjoy")
+        bits.append(f"a recommended {p_type}")
 
+    # Budget alignment — always mentioned when we have both signals
+    if budget and price_level:
+        budget_norm  = budget if budget in _BUDGET_LABEL else "mid"
+        price_norm   = price_level if price_level in _PRICE_LABEL else "mid"
+        budget_str   = _BUDGET_LABEL[budget_norm]
+        price_str    = _PRICE_LABEL[price_norm]
+
+        if budget_norm == price_norm:
+            bits.append(f"matches your {budget_str} weekly budget")
+        elif budget_norm == "cheap" and price_norm == "mid":
+            bits.append("slightly above your budget range")
+        elif budget_norm == "cheap" and price_norm == "expensive":
+            bits.append("note: priced above your budget")
+        elif budget_norm == "mid" and price_norm == "expensive":
+            bits.append("on the higher end of your budget")
+        else:
+            bits.append(f"priced {price_str}, fits your spending range")
+
+    # Weekend preference
     if weekend == "outdoor" and p_type in ("outdoor", "park", "hiking"):
-        bits.append("matches your outdoor weekend preference")
-    elif weekend == "indoor" and p_type in ("cafe", "coffee", "cinema"):
-        bits.append("matches your indoor weekend preference")
+        bits.append("ideal for your outdoor weekends")
+    elif weekend == "indoor" and p_type in ("cafe", "coffee", "cinema", "workspace"):
+        bits.append("suits your indoor weekend preference")
 
+    # Interest match
     if interests:
-        match = [i for i in interests if str(i).lower() in p_type]
-        if match:
-            bits.append(f"close to your {match[0]} interests")
-
-    if budget == "cheap":
-        if price_level == "cheap":
-            bits.append("within your budget")
-    elif budget == "expensive":
-        if price_level == "expensive":
-            bits.append("fits your premium tier")
+        matched = [i for i in interests if str(i).lower() in p_type or p_type in str(i).lower()]
+        if matched:
+            bits.append(f"aligns with your {matched[0]} interest")
 
     reason = "; ".join(bits)
     if not reason:
-        reason = f"Recommended {p_type} based on your profile"
+        reason = f"Recommended {p_type} for your profile"
     return f"{reason.capitalize()}. {name} suits the moment."
 
 
@@ -231,17 +258,20 @@ def generate_recommendation_reason(
                 {
                     "role": "system",
                     "content": (
-                        "You write one short, friendly sentence (<= 25 words) that "
+                        "You write one short, friendly sentence (<= 28 words) that "
                         "explains why a specific place is recommended to a user. "
                         "Context: Addis Ababa, Ethiopia. "
-                        "When pricingEnabled in the Place JSON is false, do NOT mention "
-                        "prices, budget, tiers, tickets, ETB, or affordability. Focus on "
-                        "experience, relevance, vibe, beliefs, logistics, distance, timing. "
-                        "When pricingEnabled is true, area pricing hints still apply "
-                        "(Bole Road pricey; Kazanchis mid-high; Mercato/Piazza often budget). "
-                        "Speak directly to the user. No emojis, no greetings, no "
-                        "bullet points. Reference at most one user signal and one "
-                        "place trait. Do not invent prices or facts."
+                        "BUDGET RULES (critical): "
+                        "- When user budget is 'cheap' and place is 'cheap': say it fits their budget. "
+                        "- When user budget is 'cheap' and place is 'mid': mention it's slightly above budget. "
+                        "- When user budget is 'cheap' and place is 'expensive': warn it's above their budget. "
+                        "- When user budget is 'mid' and place is 'mid' or 'cheap': say it matches their budget. "
+                        "- When user budget is 'expensive': mention premium quality. "
+                        "When pricingEnabled is false, do NOT mention prices or budget — focus on "
+                        "experience, vibe, beliefs, or timing. "
+                        "Area hints: Bole Road = expensive; Kazanchis = mid; Mercato/Piazza = cheap. "
+                        "Speak directly to the user. No emojis, no greetings, no bullet points. "
+                        "Reference budget alignment first, then one place trait. Do not invent prices."
                     ),
                 },
                 {
@@ -410,13 +440,21 @@ def merge_pricing_eligibility_llm(place: dict[str, Any], heuristic: dict[str, An
     prompt = (
         "You classify venues in Addis Ababa, Ethiopia for a consumer app.\n"
         "Decide whether the place USUALLY involves spending money "
-        "(meals, tickets, lodging, coworking, museum admission, gym, shopping mall purchase, paid event).\n"
+        "(meals, tickets, lodging, coworking, museum admission, gym, shopping purchase, paid event).\n"
         "Use pricing_enabled=false for: churches, mosques, ordinary public parks, playgrounds, hiking trails, "
-        "free street events, volunteer gatherings, typical public libraries (no cafe/membership), monuments.\n"
-        "pricing_enabled=true for: restaurants, cafes, hotels, gyms, cinemas, paid events with tickets, "
-        "coworking, stores, museums with admission, paid sports clubs.\n"
-        "Review language: words like affordable, luxury, cheap, overpriced, premium inform estimated_price_level.\n"
-        "Area: Bole Road/airport often expensive; Kazanchis mid-high; Mercato/Piazza often budget; Piazza can be mixed.\n"
+        "free street events, volunteer gatherings, typical public libraries, monuments.\n"
+        "pricing_enabled=true for: restaurants, cafes, hotels, gyms, cinemas, paid events, "
+        "coworking spaces, stores, museums with admission, paid sports clubs.\n\n"
+        "PRICE TIER GUIDE for Addis Ababa (weekly budget context):\n"
+        "  cheap (≤ 2,000 ETB/wk): local tej bets, fatira stalls, neighborhood kitfo spots, "
+        "small local cafes (Tomoca branch, buna bet), community gyms, Mercato vendors, Shola market.\n"
+        "  mid (2,001–10,000 ETB/wk): Bole cafes (Kaldi's), mid-range Kazanchis restaurants, "
+        "standard hotel gyms, boutique workspaces, average cinema tickets, Edna Mall food court.\n"
+        "  expensive (> 10,000 ETB/wk): Skylight Hotel, Hyatt Regency, Sheraton Addis, Radisson Blu, "
+        "Hilton, Marriott, rooftop bars, VIP lounges, fine dining, premium spas.\n"
+        "Review language: 'affordable/cheap/local/budget' → cheap; 'overpriced/luxury/premium/5-star' → expensive.\n"
+        "Area hints: Bole Road strip / airport = expensive; Kazanchis / Sarbet = mid; "
+        "Mercato / Piazza / Shola = cheap.\n"
         "Return ONE JSON object only, no markdown code fences:\n"
         '{"pricing_enabled":true|false,"reason":"one short sentence",'
         '"estimated_price_level":"cheap"|"mid"|"expensive"|null,'

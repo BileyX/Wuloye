@@ -27,35 +27,47 @@ logger = logging.getLogger(__name__)
 
 _EXPENSIVE_BRANDS: tuple[str, ...] = (
     "skylight hotel", "hyatt regency", "hyatt", "sheraton addis",
-    "sheraton", "radisson blu", "radisson", "hilton", "marriott",
-    "ramada", "intercontinental", "kempinski", "ellilly", "elilly",
+    "sheraton", "radisson blu", "radisson", "hilton addis", "hilton",
+    "marriott", "ramada", "intercontinental", "kempinski", "ellilly", "elilly",
     "golden tulip", "capital hotel", "elilly international", "trinity hotel",
-    "best western plus", "golden tulip",
+    "best western plus", "four seasons", "monarch hotel", "summit hotel addis",
+    "kaleidoscope", "harmony hotel", "norwegian church", "desalegn hotel",
+    "dreamliner hotel", "axiom hotel", "eden hotel", "ghion hotel", "lion park hotel",
 )
 
 # Generic luxury markers — apply when NOT combined with cheap/local signals
 _LUXURY_KEYWORDS: tuple[str, ...] = (
     "luxury", "premium", "fine dining", "five star", "5-star", "5 star",
     "exclusive club", "vip lounge", "sky bar", "rooftop bar",
-    "boutique hotel", "high-end", "upscale", "gourmet",
+    "boutique hotel", "high-end", "upscale", "gourmet", "infinity pool",
+    "rooftop restaurant", "penthouse", "cigar lounge", "whisky bar",
+    "premium lounge", "international buffet", "business class dining",
+    "spa resort", "resort hotel",
 )
 
-# Cheap markers — very distinctive
+# Cheap markers — very distinctive Ethiopian local venues
 _CHEAP_KEYWORDS: tuple[str, ...] = (
     "mercato", "merkato", "sook", "souq", "kibat",
     "local restaurant", "local food", "tej bet", "tella bet", "buna bet",
     "enjera bet", "local kitfo", "traditional injera",
     "street food", "addis ketema", "shola market",
-    "cheap", "budget restaurant", "affordable",
-    # Common low-tier chains / phrases
-    "kategna", "yod abyssinia local",   # Kategna is cheap-mid local chain
+    "cheap", "budget restaurant", "affordable", "inexpensive",
+    "fatira", "firfir", "fir fir", "tibs local", "local tibs",
+    "breakfast spot", "injera house", "local buna", "tea house",
+    "kitfo bet", "shiro bet", "local cafe", "neighborhood cafe",
+    "kategna", "sandwich stall", "mini mart", "kiosk",
+    "budget gym", "community gym", "local gym",
+    "tej house", "areke", "katikala",
 )
 
 # Mid-range markers
 _MID_KEYWORDS: tuple[str, ...] = (
     "cafe", "café", "bistro", "pastry", "pizzeria", "grill room",
     "garden restaurant", "lounge", "tomoca", "kaldi's", "kaldis",
-    "burger king", "pizza hut",
+    "burger king", "pizza hut", "sandwiches", "juice bar",
+    "co-working", "coworking", "workspace",
+    "standard gym", "fitness center", "yoga studio",
+    "bakery", "coffee shop", "smoothie", "gelato",
 )
 
 # ── 2. Area reputation map ────────────────────────────────────────────────────
@@ -64,39 +76,58 @@ _MID_KEYWORDS: tuple[str, ...] = (
 # (expensive area + no cheap signals → expensive; but "local food" overrides)
 
 _AREA_TIERS: tuple[tuple[str, str], ...] = (
-    # Expensive sub-zones
-    ("bole internacional", "expensive"),
-    ("bole international", "expensive"),
-    ("bole land mark", "expensive"),
-    ("bole road",      "expensive"),   # Bole Road strip = upscale restaurants
-    ("airport",        "expensive"),   # airport-adjacent → expensive
-    ("edna mall",      "mid"),
-    # General Bole = mid (common cafes, mid restaurants — not automatically expensive)
-    ("bole",           "mid"),
+    # Expensive sub-zones (order: longest match wins)
+    ("bole internacional",  "expensive"),
+    ("bole international",  "expensive"),
+    ("bole land mark",      "expensive"),
+    ("bole landmark",       "expensive"),
+    ("bole road",           "expensive"),   # Bole Road strip = upscale
+    ("bole sub city",       "mid"),
+    ("addis ababa bole",    "mid"),
+    ("airport",             "expensive"),   # airport-adjacent → expensive
+    ("haile grand hotel",   "expensive"),
+    ("millennium hall",     "mid"),
+    ("edna mall",           "mid"),
+    ("friendship mall",     "mid"),
+    # General Bole = mid (mix of cafes and mid restaurants)
+    ("bole",                "mid"),
     # Mid-range neighborhoods
-    ("old airport",    "mid"),
-    ("kazanchis",      "mid"),
-    ("atlas",          "mid"),
-    ("sarbet",         "mid"),
-    ("gerji",          "mid"),
-    ("megenagna",      "mid"),
-    ("haya hulet",     "mid"),
-    ("22 mazoria",     "mid"),
-    ("summit",         "mid"),
-    ("jemo",           "mid"),
-    ("ayat",           "mid"),
+    ("old airport",         "mid"),
+    ("kazanchis",           "mid"),
+    ("atlas",               "mid"),
+    ("sarbet",              "mid"),
+    ("gerji",               "mid"),
+    ("megenagna",           "mid"),
+    ("haya hulet",          "mid"),
+    ("22 mazoria",          "mid"),
+    ("summit",              "mid"),
+    ("jemo",                "mid"),
+    ("ayat",                "mid"),
+    ("gotera",              "mid"),
+    ("bisrate gebriel",     "mid"),
+    ("legehar",             "mid"),
+    ("mexico",              "mid"),
+    ("bambis",              "mid"),
+    ("arat kilo",           "mid"),
+    ("sidist kilo",         "mid"),
+    ("lafto",               "mid"),
+    ("nifas silk",          "mid"),
     # Budget neighborhoods
-    ("mercato",        "cheap"),
-    ("merkato",        "cheap"),
-    ("addis ketema",   "cheap"),
-    ("shola",          "cheap"),
-    ("saris",          "cheap"),
-    ("piazza",         "cheap"),
-    ("kality",         "cheap"),
-    ("lideta",         "cheap"),
-    ("akaki",          "cheap"),
-    ("kolfe",          "cheap"),
-    ("gulele",         "cheap"),
+    ("mercato",             "cheap"),
+    ("merkato",             "cheap"),
+    ("addis ketema",        "cheap"),
+    ("shola",               "cheap"),
+    ("saris",               "cheap"),
+    ("piazza",              "cheap"),
+    ("kality",              "cheap"),
+    ("lideta",              "cheap"),
+    ("akaki",               "cheap"),
+    ("kolfe",               "cheap"),
+    ("gulele",              "cheap"),
+    ("yeka",                "cheap"),
+    ("entoto",              "cheap"),
+    ("ferensay",            "cheap"),
+    ("arada",               "cheap"),
 )
 
 # Compiled regex — one pass for keywords, one for area detection
@@ -180,12 +211,17 @@ def _from_rating(place: dict[str, Any]) -> tuple[str | None, float, list[str]]:
 
     if r is None:
         return None, 0.0, []
-    if r >= 4.6 and n >= 800:
+    # High rating + many reviews often indicates a premium venue
+    if r >= 4.6 and n >= 1000:
         return "expensive", 0.55, [f"rating={r} reviews={n}"]
+    if r >= 4.5 and n >= 500:
+        return "expensive", 0.48, [f"rating={r} reviews={n}"]
     if r >= 4.3 and n >= 200:
         return "mid",       0.45, [f"rating={r} reviews={n}"]
-    if r <= 3.0:
-        return "cheap",     0.35, [f"rating={r}"]
+    if r >= 4.0 and n >= 50:
+        return "mid",       0.38, [f"rating={r} reviews={n}"]
+    if r <= 3.0 and n >= 5:
+        return "cheap",     0.38, [f"rating={r}"]
     return None, 0.0, []
 
 
@@ -252,18 +288,22 @@ def classify_place(place: dict[str, Any]) -> tuple[str, float, list[str]]:
             return "mid", 0.50, sigs + ["area_override=cheap"]
         return "expensive", min(0.82, 0.60 + 0.05 * len(lux_hits)), sigs
 
-    # Build weighted vote from area + rating
+    # Build weighted vote from area + rating + mid keywords
     candidates: list[tuple[str, float, list[str]]] = []
     if area_tier:
-        candidates.append((area_tier, 0.52, [f"area={area_tier}"]))
+        # Area is a strong signal — boost its weight
+        area_conf = 0.60 if area_tier in ("cheap", "expensive") else 0.55
+        candidates.append((area_tier, area_conf, [f"area={area_tier}"]))
     if r_tier:
         candidates.append((r_tier, r_conf, r_sigs))
     if has_mid and not area_tier:
-        mid_conf = min(0.60, 0.38 + 0.05 * len(mid_hits))
+        mid_conf = min(0.62, 0.42 + 0.05 * len(mid_hits))
         candidates.append(("mid", mid_conf, [f"mid_kw={','.join(sorted({h.lower() for h in mid_hits}))[:40]}"]))
 
     if not candidates:
-        return "mid", 0.20, ["fallback_default"]
+        # Default to mid with a slightly higher confidence so downstream LLM refinement
+        # has a clearer baseline to override.
+        return "mid", 0.30, ["fallback_default"]
 
     bucket: dict[str, list[float]] = {}
     sigs_map: dict[str, list[str]] = {}
@@ -272,5 +312,7 @@ def classify_place(place: dict[str, Any]) -> tuple[str, float, list[str]]:
         sigs_map.setdefault(tier, []).extend(sigs)
 
     best = max(bucket, key=lambda t: sum(bucket[t]))
-    conf = min(0.90, sum(bucket[best]) / max(1, len(candidates)))
+    # Normalise: use max confidence among votes for the winning tier (not average)
+    # so that a single strong signal beats two weak opposing ones.
+    conf = min(0.92, max(bucket[best]))
     return best, round(conf, 3), sigs_map[best]

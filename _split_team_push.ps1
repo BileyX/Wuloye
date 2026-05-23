@@ -68,7 +68,7 @@ New-TeamCommit -Name "biruk-1" -Email "99360145+biruk-1@users.noreply.github.com
 git push -u origin feature/biruk-1/admin-dashboard-and-mobile-integration --force-with-lease
 Write-Host "OK feature/biruk-1/admin-dashboard-and-mobile-integration -> biruk-1"
 
-Publish-Branch "feature/joworlds/ai-learning-feedback-batch" "jowrlds" "yosites2002@gmail.com" "feat(ai-service): bandit learning, feedback, events router, and pipeline updates" @(
+Publish-Branch "feature/biruk-1/ai-learning-feedback-batch" "biruk-1" "99360145+biruk-1@users.noreply.github.com" "feat(ai-service): bandit learning, feedback, events router, and pipeline updates" @(
     "ai-service/data/bandit_state.json",
     "ai-service/data/model_meta.json",
     "ai-service/learning",

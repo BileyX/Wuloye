@@ -64,6 +64,7 @@ export const INTERACTION_TYPES = {
     // Passive
     VIEW:              "view",
     VIEW_LONG:         "view_long",
+    QUICK_EXIT:        "quick_exit",
     // Navigation intent
     CLICK:             "click",
     DIRECTIONS:        "directions",
@@ -77,6 +78,12 @@ export const INTERACTION_TYPES = {
     // Events
     OPEN_EVENT:        "open_event",
     JOIN_EVENT:        "join_event",
+    // Explicit feedback (rec rating)
+    FEEDBACK_EXCELLENT:    "feedback_excellent",
+    FEEDBACK_GOOD:         "feedback_good",
+    FEEDBACK_NEUTRAL:      "feedback_neutral",
+    FEEDBACK_POOR:         "feedback_poor",
+    FEEDBACK_NOT_RELEVANT: "feedback_not_relevant",
     // Negative
     DISLIKE:           "dislike",
     DISMISS:           "dismiss",

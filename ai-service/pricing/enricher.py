@@ -21,7 +21,9 @@ from .estimator import estimate_cost
 
 logger = logging.getLogger(__name__)
 
-_PRICING_LLM_REFINE = os.getenv("PRICING_LLM_REFINE", "false").lower() in (
+# Enabled by default — the LLM refines ambiguous venues with Ethiopian economic context.
+# Set PRICING_LLM_REFINE=false to disable (e.g. in low-cost dev environments).
+_PRICING_LLM_REFINE = os.getenv("PRICING_LLM_REFINE", "true").lower() in (
     "1", "true", "yes",
 )
 _PRICING_LLM_ALWAYS = os.getenv("PRICING_LLM_ALWAYS", "false").lower() in (

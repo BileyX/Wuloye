@@ -58,27 +58,37 @@ def _time_slot(hour: int) -> str:
     if 17 <= hour < 22:  return "evening"
     return "night"
 
-# Weights mapping action_type → signal strength for preference vectors
+# Weights mapping action_type → signal strength for preference vectors.
+# These shape how fast the in-memory affinity vector adapts.
 _PREF_SIGNAL: dict[str, float] = {
+    # Positive — engagement
     "view":             0.02,
-    "view_long":        0.08,
+    "view_long":        0.10,   # was 0.08 — long stays are strong taste signal
     "click":            0.04,
-    "directions":       0.12,
-    "call":             0.10,
-    "share":            0.08,
-    "like":             0.09,
-    "save":             0.18,
-    "mark_interested":  0.06,
-    "revisit":          0.20,
+    "directions":       0.15,   # was 0.12
+    "call":             0.12,   # was 0.10
+    "share":            0.10,   # was 0.08
+    "like":             0.12,   # was 0.09
+    "save":             0.22,   # was 0.18
+    "mark_interested":  0.08,   # was 0.06
+    "revisit":          0.25,   # was 0.20 — strongest single signal
     "open_event":       0.04,
-    "join_event":       0.18,
-    "schedule_complete": 0.18,
-    "activity_complete": 0.18,
-    "dislike":         -0.14,
-    "dismiss":         -0.10,
-    "skip":            -0.06,
-    "not_interested":  -0.14,
-    "remove_save":     -0.05,
+    "join_event":       0.22,   # was 0.18
+    "schedule_complete": 0.20,
+    "activity_complete": 0.20,
+    # Explicit feedback (NEW)
+    "feedback_excellent":   0.25,
+    "feedback_good":        0.10,
+    "feedback_neutral":     0.00,
+    # Negative — rejection
+    "dislike":         -0.20,   # was -0.14
+    "dismiss":         -0.14,   # was -0.10
+    "skip":            -0.08,   # was -0.06
+    "not_interested":  -0.25,   # was -0.14 — STRONG: stop suggesting this
+    "remove_save":     -0.08,   # was -0.05
+    "quick_exit":      -0.10,   # NEW — left detail page quickly
+    "feedback_poor":        -0.18,
+    "feedback_not_relevant": -0.30,
 }
 
 
@@ -130,23 +140,38 @@ def get_top_categories(user_id: str, n: int = 5) -> list[tuple[str, float]]:
 
 def generate_explanation(user_id: str, place_type: str) -> str | None:
     """
-    Generate a natural-language explanation for why a place is recommended.
-    Returns None when there is not enough signal yet.
+    Generate a natural-language explanation for why a place is recommended,
+    based on the user's learned preference vector + interaction history.
+
+    Returns None when there's not enough signal yet (cold-start fallback to
+    the LLM/template explanation instead).
     """
     vec = get_preference_vector(user_id)
-    top = get_top_categories(user_id, 3)
+    if not vec:
+        return None
 
+    top = get_top_categories(user_id, 3)
     affinity = vec.get(place_type, 0.5)
 
-    if affinity >= 0.80:
-        return f"Recommended because you consistently engage with {place_type} places."
-    if affinity >= 0.65:
-        return f"Matches your strong preference for {place_type}."
+    # Strong direct affinity — phrase based on intensity
+    if affinity >= 0.85:
+        return f"You consistently engage with {place_type} places — this is one of your top categories."
+    if affinity >= 0.70:
+        return f"Recommended because you've shown a strong preference for {place_type}."
+    if affinity >= 0.60:
+        return f"Matches your interest in {place_type} based on recent activity."
 
+    # Cross-category — top categories suggest a related place
     if top:
         top_cat, top_score = top[0]
-        if top_score >= 0.70:
-            return f"Based on your frequent interest in {top_cat} and similar places."
+        if top_score >= 0.75 and top_cat != place_type:
+            return f"Based on your frequent interest in {top_cat}, you may enjoy this {place_type} too."
+        if top_score >= 0.65 and top_cat == place_type:
+            return f"You often save {place_type} places — here's another worth checking out."
+
+    # Mild signal — neutral phrasing
+    if affinity >= 0.55:
+        return f"Aligns with your interest in {place_type}."
 
     return None
 
@@ -226,7 +251,11 @@ _KNOWN_ACTIONS = frozenset({
     "like", "save", "mark_interested", "revisit",
     "open_event", "join_event",
     "dislike", "dismiss", "skip", "not_interested", "remove_save",
+    "quick_exit",
     "search", "filter_use", "schedule_complete", "activity_complete",
+    # Explicit feedback ratings
+    "feedback_excellent", "feedback_good", "feedback_neutral",
+    "feedback_poor", "feedback_not_relevant",
 })
 
 
