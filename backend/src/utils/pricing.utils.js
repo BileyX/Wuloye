@@ -15,6 +15,11 @@
  * Output: "cheap" | "mid" | "expensive" (always returns one of the three)
  */
 
+import {
+  getPlaceReligionType as _classifyReligion,
+  denominationAllowedForUser as _denominationAllowed,
+} from "./denominationClassifier.js";
+
 // ── Keyword lists ────────────────────────────────────────────────────────────
 
 const EXPENSIVE_BRANDS = [
@@ -516,7 +521,8 @@ export function userBudgetTier(profile) {
 }
 
 /**
- * Determines the religion type of a place (only for religious venues).
+ * Determines the denomination of a place (only for religious venues).
+ * Delegates to the full denomination classifier for high-accuracy results.
  *
  * Returns:
  *   "muslim"     — mosque / islamic prayer hall
@@ -531,61 +537,7 @@ export function userBudgetTier(profile) {
  */
 export function getPlaceReligionType(place) {
   if (!place) return null;
-  const text = gatherText(place);
-  const type = (place.type || place.category || "").toLowerCase();
-
-  // Must be a religious venue type OR contain relevant keywords in the name/tags
-  const isReligiousVenue =
-    ["church", "mosque", "worship", "prayer", "chapel", "temple", "masjid", "mesjid",
-     "cathedral", "jami", "jamia", "islamic", "synagogue", "hindu_temple"]
-      .some((k) => type.includes(k) || text.includes(k));
-
-  if (!isReligiousVenue) return null;
-
-  // Muslim — covers masjid / mesjid / jami / jamia / islamic / salah spellings
-  if (
-    text.includes("mosque")   || text.includes("masjid")  || text.includes("mesjid") ||
-    text.includes("jami")     || text.includes("jamia")   || text.includes("muslim")  ||
-    text.includes("islamic")  || text.includes("salah")   || text.includes("musalla") ||
-    type.includes("mosque")
-  ) return "muslim";
-
-  // Orthodox (Ethiopian) — explicit parentheses to guard && vs || precedence
-  if (
-    text.includes("orthodox")       ||
-    text.includes("debre")          ||
-    text.includes("kidus")          ||
-    text.includes("kidist")         ||
-    text.includes("kiddis")         ||
-    text.includes("bete christian") ||
-    text.includes("giorgis")        ||
-    text.includes("medhanealem")    ||
-    (text.includes("mariam")     && text.includes("orthodox")) ||
-    (text.includes("medhane alem") && type.includes("church"))
-  ) return "orthodox";
-
-  // Protestant / Evangelical
-  if (
-    text.includes("protestant") || text.includes("evangelical") ||
-    text.includes("mekane yesus") || text.includes("kale hiwot") ||
-    text.includes("seventh") || text.includes("adventist") ||
-    text.includes("pentecost") || text.includes("full gospel") ||
-    text.includes("baptist") || text.includes("lutheran")
-  ) return "protestant";
-
-  // Catholic
-  if (
-    text.includes("catholic") || text.includes("roman church") ||
-    text.includes("franciscan") || text.includes("jesuit")
-  ) return "catholic";
-
-  // Generic Christian
-  if (
-    text.includes("church") || text.includes("chapel") || text.includes("worship") ||
-    text.includes("prayer hall") || text.includes("christian")
-  ) return "christian";
-
-  return null;
+  return _classifyReligion(place);
 }
 
 /**
@@ -593,40 +545,16 @@ export function getPlaceReligionType(place) {
  *
  * Rules:
  *   - Non-religious places → always allowed
- *   - orthodox  user → orthodox + christian churches only
- *   - protestant user → protestant + christian churches only
+ *   - orthodox  user → orthodox churches only (strict — no generic christian)
+ *   - protestant user → protestant churches only
  *   - muslim    user → mosques only
- *   - catholic  user → catholic + christian churches only
+ *   - catholic  user → catholic churches only
  *   - other / prefer_not_to_say / null → all places (no filter)
  *
- * @param {object}      place       — place object
+ * @param {object}      place        — place object
  * @param {string|null} userReligion — user's religion from profile
  * @returns {boolean}
  */
 export function placeAllowedByReligion(place, userReligion) {
-  const placeReligion = getPlaceReligionType(place);
-
-  // Not a religious venue → always visible to everyone
-  if (!placeReligion) return true;
-
-  // User has no religion set or prefers not to say → show all places
-  if (!userReligion || userReligion === "prefer_not_to_say" || userReligion === "other") {
-    return true;
-  }
-
-  const user = userReligion.toLowerCase().trim();
-
-  switch (user) {
-    case "orthodox":
-      return ["orthodox", "christian"].includes(placeReligion);
-    case "protestant":
-      return ["protestant", "christian"].includes(placeReligion);
-    case "muslim":
-      return placeReligion === "muslim";
-    case "catholic":
-      return ["catholic", "christian"].includes(placeReligion);
-    default:
-      // Unknown religion string → don't filter
-      return true;
-  }
+  return _denominationAllowed(place, userReligion);
 }

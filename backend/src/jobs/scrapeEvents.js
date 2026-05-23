@@ -14,6 +14,7 @@
  */
 
 import { logger } from "../utils/logger.js";
+import { invalidateEventsCache, warmEventsCache } from "../services/event.service.js";
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://ai-service:8000";
 const SCRAPER_API_KEY = process.env.SCRAPER_API_KEY || "";
@@ -62,9 +63,16 @@ export const runScrapingCycle = async () => {
 
     logger.info(
       `[scrapeEvents] Cycle complete in ${elapsed}s — ` +
-      `inserted=${result.inserted ?? 0}  skipped=${result.skipped_duplicates ?? 0}  ` +
-      `total_scraped=${result.total_scraped ?? 0}`
+      `inserted=${result.inserted ?? 0}  upgraded=${result.upgraded ?? 0}  ` +
+      `skipped=${result.skipped_duplicates ?? 0}  ` +
+      `cleaned_up=${result.cleaned_up ?? 0}  total_scraped=${result.total_scraped ?? 0}  ` +
+      `sources=${JSON.stringify(result.sources ?? {})}`
     );
+
+    // Fresh Chapa / Eventbrite rows must appear immediately — bust list caches.
+    if ((result.inserted ?? 0) > 0 || (result.upgraded ?? 0) > 0) {
+      await warmEventsCache();
+    }
 
     return result;
   } catch (err) {

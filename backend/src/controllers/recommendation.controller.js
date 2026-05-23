@@ -66,9 +66,6 @@ export const getRecommendationsHandler = async (req, res, next) => {
       ? { lat: rawLat, lng: rawLng, radiusMeters: radiusKm * 1000 }
       : null;
 
-    // ── Phase 15: optional fast / fallback mode ───────────────────────────────
-    const fastMode = req.query.fast === "true";
-
     const rawType     = req.query.type     ?? null;
     const rawCategory = req.query.category ?? null;
     const rawTypes    = req.query.types    ?? null;
@@ -78,6 +75,10 @@ export const getRecommendationsHandler = async (req, res, next) => {
       rawType,
       rawTypes
     );
+
+    // Discover category taps skip heavy AI/embedding work for sub-3s responses.
+    const fastMode =
+      req.query.fast === "true" || Boolean(discoverKey);
 
     // ─ Mode filter: changes the final sort strategy ─────────────────────────
     // ?mode=trending  → re-rank by trendScore × rating

@@ -46,11 +46,33 @@ export function extractLooseImageUrlFromText(text) {
     return m ? normalizeRemoteImageUri(m[0]) : "";
 }
 
+const CHAPA_CDN = "https://assets.chapa.co/customer-uploads/";
+const CHAPA_SOURCE_RE = /chapa/i;
+
+/**
+ * Normalise a Chapa CDN path to a full absolute URL.
+ * chapa_scraper sometimes emits just the filename; ensure it's absolute.
+ */
+function normalizeChapaImageUri(raw) {
+    if (!raw || typeof raw !== "string") return "";
+    const t = raw.trim();
+    if (t.startsWith("http")) return t;
+    if (t.startsWith(CHAPA_CDN)) return t;
+    // bare filename like "EV_abc123.png"
+    if (/^[\w\-]+\.(jpg|jpeg|png|webp|gif)$/i.test(t)) {
+        return `${CHAPA_CDN}${t}`;
+    }
+    return "";
+}
+
 /**
  * Best thumbnail URL for an event document from Firestore/API.
+ * Priority: Chapa CDN > other absolute URLs > relative paths > prose extraction.
  */
 export function resolveEventThumbnailUri(event) {
     if (!event || typeof event !== "object") return "";
+
+    const isChapa = CHAPA_SOURCE_RE.test(String(event.source || ""));
 
     const bases = [];
     if (typeof event.source_url === "string" && event.source_url.trim()) {
@@ -64,8 +86,15 @@ export function resolveEventThumbnailUri(event) {
     }
 
     for (const raw of candidates) {
+        // Chapa events: try CDN normalisation first
+        if (isChapa) {
+            const c = normalizeChapaImageUri(raw);
+            if (c) return c;
+        }
+
         const abs = normalizeRemoteImageUri(raw);
         if (abs) return abs;
+
         if (raw.startsWith("/")) {
             for (const base of bases) {
                 try {
@@ -116,12 +145,30 @@ export function eventHueSeed(event) {
 }
 
 /**
- * Two-stop gradient when no real thumbnail exists — unique per event, not stock photos.
+ * Category-aware vibrant gradients — unique per event, visually rich.
  */
+const CATEGORY_GRADIENT_HUES = {
+    music:     [280, 320],   // purple → pink
+    tech:      [210, 240],   // blue → indigo
+    business:  [25,  45],    // amber → orange
+    sports:    [160, 200],   // teal → cyan
+    fitness:   [130, 160],   // green → teal
+    church:    [35,  55],    // warm gold
+    food:      [10,  35],    // red → orange
+    art:       [290, 330],   // violet → magenta
+    social:    [180, 210],   // cyan → blue
+    education: [215, 250],   // blue → indigo
+    other:     [null, null], // use event hash
+};
+
 export function eventPlaceholderGradientColors(event) {
+    const cat = String(event?.category || "other").toLowerCase();
+    const pair = CATEGORY_GRADIENT_HUES[cat] ?? CATEGORY_GRADIENT_HUES.other;
     const hue = eventHueSeed(event);
-    const top = hslToHex(hue, 46, 36);
-    const bottom = hslToHex((hue + 22) % 360, 50, 20);
+    const h1 = pair[0] ?? hue;
+    const h2 = pair[1] ?? ((hue + 30) % 360);
+    const top    = hslToHex(h1, 62, 32);
+    const bottom = hslToHex(h2, 55, 18);
     return [top, bottom];
 }
 

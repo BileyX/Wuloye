@@ -1,5 +1,49 @@
 import apiClient from "./client";
 
+// ─── Events-list cache (short TTL, avoids duplicate in-flight requests) ────────
+
+const EVENTS_LIST_TTL_MS = 3 * 60 * 1000; // 3 minutes
+const _eventsListCacheMap = new Map(); // key → { t, data }
+
+const eventsListCacheGet = (key) => {
+    const entry = _eventsListCacheMap.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.t > EVENTS_LIST_TTL_MS) {
+        _eventsListCacheMap.delete(key);
+        return null;
+    }
+    return entry.data;
+};
+const eventsListCacheSet = (key, data) => {
+    _eventsListCacheMap.set(key, { t: Date.now(), data });
+};
+export const invalidateEventsListCache = () => {
+    _eventsListCacheMap.clear();
+};
+
+// ─── Recommended-events cache ──────────────────────────────────────────────────
+
+const RECO_LIST_TTL_MS = 3 * 60 * 1000;
+let _recoListCache = null; // { t, data }
+
+const recoListCacheGet = () => {
+    if (!_recoListCache) return null;
+    if (Date.now() - _recoListCache.t > RECO_LIST_TTL_MS) {
+        _recoListCache = null;
+        return null;
+    }
+    return _recoListCache.data;
+};
+const recoListCacheSet = (data) => {
+    _recoListCache = { t: Date.now(), data };
+};
+export const invalidateRecoListCache = () => {
+    _recoListCache = null;
+};
+
+// ─── Dedup in-flight recommended request ──────────────────────────────────────
+let _recoInflight = null;
+
 // ─── Single-event cache (repeat opens + deduped in-flight fetches) ─────────────
 
 const EVENT_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -44,17 +88,49 @@ export function prefetchEventById(eventId) {
  * @param {number} [params.lng]       — user longitude for proximity sort
  */
 export async function getEvents(params = {}) {
-    const { data } = await apiClient.get("/events", { params });
+    const listCacheKey =
+        !params.category && !params.dateFrom && !params.dateTo && !params.location
+            ? `limit=${params.limit || 50}`
+            : null;
+    if (params.refresh) invalidateEventsListCache();
+    const isCacheable = listCacheKey && !params.refresh;
+    if (isCacheable) {
+        const cached = eventsListCacheGet(listCacheKey);
+        if (cached) return cached;
+    }
+    const { refresh, ...apiParams } = params;
+    const query = {
+        ...apiParams,
+        ...(refresh ? { refresh: "1" } : {}),
+    };
+    const { data } = await apiClient.get("/events", { params: query, timeout: 12_000 });
+    if (listCacheKey && data?.events?.length) eventsListCacheSet(listCacheKey, data);
     return data;
 }
 
 /**
  * Fetch AI-personalised events for the current authenticated user.
  * Requires a valid Firebase ID token (attached automatically by the client).
+ * De-dupes concurrent calls and caches the result for 3 minutes.
  */
 export async function getRecommendedEvents() {
-    const { data } = await apiClient.get("/events/recommended");
-    return data;
+    const cached = recoListCacheGet();
+    if (cached) return cached;
+
+    // De-duplicate concurrent calls (e.g. screen focus + mount firing together)
+    if (_recoInflight) return _recoInflight;
+
+    _recoInflight = (async () => {
+        try {
+            const { data } = await apiClient.get("/events/recommended", { timeout: 10_000 });
+            if (data?.events?.length) recoListCacheSet(data);
+            return data;
+        } finally {
+            _recoInflight = null;
+        }
+    })();
+
+    return _recoInflight;
 }
 
 /**

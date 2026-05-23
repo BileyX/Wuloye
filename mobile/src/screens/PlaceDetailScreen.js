@@ -27,6 +27,7 @@ import AuthenticatedPlacePhoto, {
 import { fetchPlaceDetails } from "../api/placeApi";
 import PlaceInteractionBar from "../components/PlaceInteractionBar";
 import { usePlaceInteractions } from "../hooks/usePlaceInteractions";
+import { getDenominationDisplay } from "../utils/denominationDisplay";
 
 const { width: SCREEN_W } = Dimensions.get("window");
 
@@ -555,6 +556,8 @@ function MatchScoreBanner({ place, palette, isDark, styles }) {
     const religionMatch = place?.matches?.religion === true;
     const hasDistance   = Boolean(place?.distance);
 
+    const { label: denomLabel, color: denomColor } = getDenominationDisplay(place);
+
     return (
         <View style={[
             styles.matchBanner,
@@ -581,12 +584,19 @@ function MatchScoreBanner({ place, palette, isDark, styles }) {
                             <Text style={[styles.matchChipText, { color: "#059669" }]}>Budget</Text>
                         </View>
                     )}
-                    {religionMatch && (
+                    {denomLabel ? (
+                        <View style={[styles.matchChip, { backgroundColor: `${denomColor}15`, borderColor: `${denomColor}40` }]}>
+                            <Ionicons name="shield-checkmark-outline" size={10} color={denomColor} />
+                            <Text style={[styles.matchChipText, { color: denomColor }]}>
+                                {religionMatch ? `Matched · ${denomLabel}` : denomLabel}
+                            </Text>
+                        </View>
+                    ) : religionMatch ? (
                         <View style={[styles.matchChip, { backgroundColor: "rgba(139,92,246,0.12)", borderColor: "rgba(139,92,246,0.35)" }]}>
                             <Ionicons name="checkmark-circle" size={10} color="#7C3AED" />
                             <Text style={[styles.matchChipText, { color: "#7C3AED" }]}>Faith</Text>
                         </View>
-                    )}
+                    ) : null}
                     {hasDistance && (
                         <View style={[styles.matchChip, { backgroundColor: "rgba(59,130,246,0.12)", borderColor: "rgba(59,130,246,0.35)" }]}>
                             <Ionicons name="location-outline" size={10} color="#2563EB" />
@@ -1370,6 +1380,11 @@ export default function PlaceDetailScreen({ navigation, route }) {
 
     const priceLabelFooter = useMemo(() => getPriceLabel(place), [place]);
 
+    const { label: denomLabel, color: denomColor } = useMemo(
+        () => getDenominationDisplay(place),
+        [place],
+    );
+
     return (
         <SafeAreaView
             style={[styles.safeArea, { backgroundColor: palette.pageTop }]}
@@ -1403,9 +1418,24 @@ export default function PlaceDetailScreen({ navigation, route }) {
                             <Text style={styles.placeName}>
                                 {place?.name ?? "Place"}
                             </Text>
-                            <Text style={styles.placeType}>
-                                {place?.type ?? "Spot"}
-                            </Text>
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                <Text style={styles.placeType}>
+                                    {place?.type ?? "Spot"}
+                                </Text>
+                                {denomLabel ? (
+                                    <View style={{
+                                        flexDirection: "row", alignItems: "center", gap: 3,
+                                        backgroundColor: `${denomColor}15`,
+                                        borderWidth: 1, borderColor: `${denomColor}40`,
+                                        borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2,
+                                    }}>
+                                        <Ionicons name="shield-checkmark-outline" size={10} color={denomColor} />
+                                        <Text style={{ color: denomColor, fontSize: 10, fontWeight: "700" }}>
+                                            {denomLabel}
+                                        </Text>
+                                    </View>
+                                ) : null}
+                            </View>
                         </View>
                         {ratingDisplay ? (
                             <View style={styles.ratingBadge}>

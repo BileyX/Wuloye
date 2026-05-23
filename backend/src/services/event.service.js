@@ -2,23 +2,32 @@
  * event.service.js — Firestore data layer for the events collection.
  *
  * Event document structure:
- *   id          {string}   — Firestore document ID
- *   title       {string}   — event name
- *   description {string}   — full description
- *   location    {string}   — venue / place name
- *   coordinates {object}   — { lat: number, lng: number }
- *   date        {string}   — ISO 8601 datetime
- *   category    {string}   — "music"|"tech"|"church"|"fitness"|"business"|"food"|"art"|"sports"|"education"|"social"|"other"
- *   image       {string}   — image URL (may be empty)
- *   source_url  {string}   — link to original event page
- *   source      {string}   — scraper id (e.g. eventbrite, meetup, culture_venue_*, rss_feed:*, telegram_*)
+ *   id               {string}   — Firestore document ID
+ *   title            {string}   — event name
+ *   description      {string}   — full description
+ *   location         {string}   — venue / place name
+ *   coordinates      {object}   — { lat: number, lng: number }
+ *   date             {string}   — ISO 8601 datetime (start)
+ *   end_date         {string}   — ISO 8601 datetime (end), optional
+ *   category         {string}   — "music"|"tech"|"church"|"fitness"|"business"|"food"|"art"|"sports"|"education"|"social"|"other"
+ *   image            {string}   — image URL (may be empty)
+ *   source_url       {string}   — link to original event page
+ *   booking_url      {string}   — external booking / ticket purchase URL (may equal source_url)
+ *   source           {string}   — scraper id (e.g. chapa_events, eventbrite, meetup, telegram_*)
+ *   is_paid          {boolean}  — true when tickets cost money
+ *   ticket_price     {string}   — human-readable price string (e.g. "ETB 600")
+ *   price_tier       {string}   — "cheap"|"affordable"|"expensive"
+ *   organizer        {string}   — event organiser name (optional)
+ *   is_featured      {boolean}  — flagged as featured by the source platform
+ *   chapa_ref_id     {string}   — Chapa Events internal ref (e.g. "EV-H1H4rtRzOzJ9")
  *   registration_urls {string[]} — optional ticket/register links extracted from text
- *   legacy_hash {string}   — optional; backward-compatible fingerprint matching older inserts
- *   created_at  {string}   — ISO 8601 of first insert into Firestore
+ *   legacy_hash      {string}   — optional; backward-compatible fingerprint
+ *   created_at       {string}   — ISO 8601 of first insert into Firestore
  */
 
 import { db } from "../config/firebase.js";
 import { logger } from "../utils/logger.js";
+import { sortEventsByTrustAndDate } from "../utils/eventSourcePriority.js";
 
 export const EVENTS_COLLECTION = "events";
 
@@ -27,11 +36,64 @@ export const VALID_CATEGORIES = Object.freeze([
   "food", "art", "sports", "education", "social", "other",
 ]);
 
-// ─── In-process cache ─────────────────────────────────────────────────────────
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+
+/** ISO timestamp for N days ago. */
+const daysAgoIso = (n) => {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString();
+};
+
+/**
+ * True when an event should be considered "expired" or "stale" and excluded
+ * from public feeds.
+ *
+ * Rules:
+ *   - Has a parseable date that is more than 1 day in the past → expired.
+ *   - No date AND was created more than 21 days ago → stale.
+ */
+const isStaleEvent = (ev) => {
+  const now = new Date();
+  const cutoff = new Date(now);
+  cutoff.setDate(cutoff.getDate() - 1);
+
+  if (ev.date) {
+    try {
+      const dt = new Date(ev.date);
+      if (!isNaN(dt) && dt < cutoff) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // No date: reject if created_at is older than 21 days
+  const createdAt = ev.created_at || ev.scraped_at;
+  if (!ev.date && createdAt) {
+    const staleCutoff = new Date(now);
+    staleCutoff.setDate(staleCutoff.getDate() - 21);
+    try {
+      if (new Date(createdAt) < staleCutoff) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return false;
+};
+
+// ─── In-process caches ────────────────────────────────────────────────────────
 
 let _cache = null;
 let _cacheTime = null;
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+/** Always fetch this many rows for the unfiltered cache so limit=15 doesn't poison it. */
+const CACHE_POOL_SIZE = 200;
+
+// Separate shorter-lived cache for candidate list (used by AI ranker)
+let _candidatesCache = null;
+let _candidatesCacheTime = null;
+const CANDIDATES_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 const isCacheValid = () =>
   Array.isArray(_cache) &&
@@ -39,15 +101,39 @@ const isCacheValid = () =>
   _cacheTime !== null &&
   Date.now() - _cacheTime < CACHE_TTL_MS;
 
+const isCandidatesCacheValid = () =>
+  Array.isArray(_candidatesCache) &&
+  _candidatesCache.length > 0 &&
+  _candidatesCacheTime !== null &&
+  Date.now() - _candidatesCacheTime < CANDIDATES_TTL_MS;
+
 const setCache = (events) => {
   _cache = events;
   _cacheTime = Date.now();
 };
 
+const setCandidatesCache = (events) => {
+  _candidatesCache = events;
+  _candidatesCacheTime = Date.now();
+};
+
 export const invalidateEventsCache = () => {
   _cache = null;
   _cacheTime = null;
+  _candidatesCache = null;
+  _candidatesCacheTime = null;
   logger.info("[events] Cache invalidated");
+};
+
+/** Call after scrape completes so Chapa / new sources appear immediately. */
+export const warmEventsCache = async () => {
+  invalidateEventsCache();
+  try {
+    await getAllEvents({ limit: CACHE_POOL_SIZE, noCache: true });
+    logger.info("[events] Cache warmed after scrape");
+  } catch (err) {
+    logger.warn(`[events] Cache warm failed: ${err.message}`);
+  }
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -86,7 +172,7 @@ export const getAllEvents = async (filters = {}) => {
   if (!category && !dateFrom && !dateTo && !location && !filters.noCache) {
     if (isCacheValid()) {
       logger.debug(`[events] Cache hit — ${_cache.length} events`);
-      return _cache.slice(0, cappedLimit);
+      return sortEventsByTrustAndDate(_cache).slice(0, cappedLimit);
     }
   }
 
@@ -121,6 +207,9 @@ export const getAllEvents = async (filters = {}) => {
         .filter((e) => String(e.category ?? "other").toLowerCase() === category);
     }
 
+    // Remove expired/stale events
+    events = events.filter((e) => !isStaleEvent(e));
+
     if (dateFrom) {
       events = events.filter((e) => !e.date || String(e.date) >= dateFrom);
     }
@@ -128,7 +217,12 @@ export const getAllEvents = async (filters = {}) => {
       events = events.filter((e) => !e.date || String(e.date) <= dateTo);
     }
 
-    events.sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+    // Sort: future-dated events first, then by created_at
+    events.sort((a, b) => {
+      const aDate = a.date || a.created_at || "";
+      const bDate = b.date || b.created_at || "";
+      return aDate.localeCompare(bDate);
+    });
 
     if (location) {
       const loc = location.toLowerCase();
@@ -137,21 +231,25 @@ export const getAllEvents = async (filters = {}) => {
       );
     }
 
-    return events.slice(0, cappedLimit);
+    return sortEventsByTrustAndDate(events.slice(0, cappedLimit));
   }
 
-  let query = db.collection(EVENTS_COLLECTION).orderBy("date", "asc");
+  const staleCutoffIso = daysAgoIso(21);
+  const fetchLimit = Math.min(Math.max(cappedLimit, CACHE_POOL_SIZE), 500);
+  let query = db
+    .collection(EVENTS_COLLECTION)
+    .where("created_at", ">=", staleCutoffIso)
+    .orderBy("created_at", "desc");
+
+  const snap = await query.limit(fetchLimit).get();
+  let events = snap.docs.map(docToEvent).filter((e) => !isStaleEvent(e));
 
   if (dateFrom) {
-    query = query.where("date", ">=", dateFrom);
+    events = events.filter((e) => !e.date || String(e.date) >= dateFrom);
   }
-
   if (dateTo) {
-    query = query.where("date", "<=", dateTo);
+    events = events.filter((e) => !e.date || String(e.date) <= dateTo);
   }
-
-  const snap = await query.limit(cappedLimit).get();
-  let events = snap.docs.map(docToEvent);
 
   // Client-side location filter (Firestore doesn't support substring)
   if (location) {
@@ -161,12 +259,19 @@ export const getAllEvents = async (filters = {}) => {
     );
   }
 
-  // Update full cache when no filters
+  // Sort by soonest date first, falling back to created_at
+  events.sort((a, b) => {
+    const aDate = a.date || a.created_at || "";
+    const bDate = b.date || b.created_at || "";
+    return aDate.localeCompare(bDate);
+  });
+
+  // Update full cache when no filters — store the full sorted pool, not just the slice.
   if (!category && !dateFrom && !dateTo && !location) {
-    setCache(events);
+    setCache(sortEventsByTrustAndDate(events));
   }
 
-  return events;
+  return sortEventsByTrustAndDate(events).slice(0, cappedLimit);
 };
 
 /**
@@ -192,56 +297,93 @@ export const getEventById = async (eventId) => {
  * @returns {Promise<object[]>}
  */
 export const getUpcomingEvents = async (limit = 20) => {
-  const now = new Date().toISOString();
+  const now = new Date();
+  const nowIso = now.toISOString();
 
-  let snap = await db
-    .collection(EVENTS_COLLECTION)
-    .where("date", ">=", now)
-    .orderBy("date", "asc")
-    .limit(limit)
-    .get();
+  // Staleness cutoff: events created more than 21 days ago that have no upcoming
+  // date are considered stale and excluded from the fallback list.
+  const staleCutoff = new Date(now);
+  staleCutoff.setDate(staleCutoff.getDate() - 21);
+  const staleCutoffIso = staleCutoff.toISOString();
 
-  if (!snap.empty) {
-    return snap.docs.map(docToEvent);
-  }
-
-  // Fallback 1: newest ingested first (helps when event dates are missing/wrong)
-  snap = await db
-    .collection(EVENTS_COLLECTION)
-    .orderBy("created_at", "desc")
-    .limit(limit)
-    .get();
-
-  if (!snap.empty) {
-    logger.info(
-      `[events] No upcoming by date>=now — returning ${snap.size} recent by created_at`
-    );
-    return snap.docs.map(docToEvent);
-  }
-
-  // Fallback 2: any events by stored date (newest first)
-  try {
-    snap = await db
+  // Run both queries in parallel; future-dated events take priority.
+  const [futureSnap, recentSnap] = await Promise.all([
+    db
       .collection(EVENTS_COLLECTION)
-      .orderBy("date", "desc")
-      .limit(limit)
-      .get();
-    return snap.docs.map(docToEvent);
-  } catch (err) {
-    logger.warn(`[events] getUpcomingEvents fallback failed: ${err.message}`);
+      .where("date", ">=", nowIso)
+      .orderBy("date", "asc")
+      .limit(limit * 2)   // fetch more so we can sort/trim
+      .get()
+      .catch(() => null),
+    db
+      .collection(EVENTS_COLLECTION)
+      .where("created_at", ">=", staleCutoffIso)
+      .orderBy("created_at", "desc")
+      .limit(limit * 2)
+      .get()
+      .catch(() => null),
+  ]);
+
+  // Build a combined set deduped by ID; future events first.
+  const seen = new Set();
+  const combined = [];
+
+  if (futureSnap && !futureSnap.empty) {
+    futureSnap.docs.forEach((doc) => {
+      seen.add(doc.id);
+      combined.push(docToEvent(doc));
+    });
+  }
+
+  if (recentSnap && !recentSnap.empty) {
+    recentSnap.docs.forEach((doc) => {
+      if (!seen.has(doc.id)) {
+        seen.add(doc.id);
+        combined.push(docToEvent(doc));
+      }
+    });
+  }
+
+  if (combined.length === 0) {
+    logger.warn("[events] getUpcomingEvents: no upcoming or recent events found");
     return [];
   }
+
+  if (futureSnap && !futureSnap.empty) {
+    logger.debug(`[events] Returning ${combined.length} events (${futureSnap.size} future + ${combined.length - futureSnap.size} recent)`);
+  } else {
+    logger.debug(`[events] No future dates — returning ${combined.length} recent events by created_at (cutoff: ${staleCutoffIso.slice(0, 10)})`);
+  }
+
+  return sortEventsByTrustAndDate(combined.slice(0, limit));
 };
 
 /**
- * Get events for AI ranking — returns upcoming events with all fields.
- * Used by the recommendation endpoint to fetch candidates.
+ * Get events for AI ranking — returns a cached candidate list.
+ * Used by the recommendation endpoint; bypasses the heavier getAllEvents
+ * filtering chain with its own fast 5-minute cache.
  *
- * @param {number} [limit=50]
+ * @param {number} [limit=80]
  * @returns {Promise<object[]>}
  */
-export const getEventCandidates = async (limit = 50) => {
-  return getUpcomingEvents(limit);
+export const getEventCandidates = async (limit = 80) => {
+  if (isCandidatesCacheValid()) {
+    logger.debug(`[events] Candidates cache hit — ${_candidatesCache.length} events`);
+    return _candidatesCache.slice(0, limit);
+  }
+
+  // If the full events cache is warm, reuse it (avoids duplicate Firestore call).
+  if (isCacheValid() && _cache.length > 0) {
+    const slice = _cache.slice(0, limit);
+    setCandidatesCache(slice);
+    return slice;
+  }
+
+  const events = await getUpcomingEvents(limit);
+  if (events.length > 0) {
+    setCandidatesCache(events);
+  }
+  return events;
 };
 
 // ─── Write helpers (admin use) ────────────────────────────────────────────────
