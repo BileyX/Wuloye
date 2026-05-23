@@ -142,6 +142,7 @@ import {
   placeAllowedByReligion,
   resolvePricingEligibility,
 } from "../utils/pricing.utils.js";
+import { classifyDenomination } from "../utils/denominationClassifier.js";
 
 const ROUTINES_COLLECTION     = "routines";
 const INTERACTIONS_COLLECTION = "interactions";
@@ -388,6 +389,11 @@ const concurrentRecommendationRequests = { count: 0 };
 const HIGH_LOAD_CONCURRENT = parseInt(process.env.RECOMMENDATION_HIGH_LOAD_CONCURRENT || "8", 10);
 /** Recommendation result cache TTL (ms). Default 5 minutes (within 1–5 min spec). */
 const RECOMMENDATION_CACHE_TTL_MS = parseInt(process.env.RECOMMENDATION_CACHE_TTL_MS || "300000", 10);
+/** Longer TTL for Discover chip results (same location + category). */
+const DISCOVER_CACHE_TTL_MS = parseInt(process.env.DISCOVER_CACHE_TTL_MS || "600000", 10);
+
+const recommendationCacheTtl = (discoverCategoryKey) =>
+  discoverCategoryKey ? DISCOVER_CACHE_TTL_MS : RECOMMENDATION_CACHE_TTL_MS;
 /** Places scored per setImmediate chunk (parallel scheduling across event-loop turns). */
 const SCORE_CHUNK_SIZE = parseInt(process.env.RECOMMENDATION_SCORE_CHUNK_SIZE || "8", 10);
 
@@ -1511,27 +1517,7 @@ export const getRecommendations = async (
       : "all";
   const modeKey = modeFilter ?? "default";
 
-  const recCacheKey = `rec:${userId}:${effectiveFast ? "fast" : "full"}:${locationKey}:${
-    experimentActive ? experimentVariant : "off"
-  }:${typeFilterKey}:${modeKey}`;
-
   try {
-    // ── Phase 15: Recommendation cache (skip for debug — those carry scoreBreakdown) ─
-    if (!debug) {
-      const cached = recommendationCache.get(recCacheKey);
-      if (cached) {
-        const elapsedMs = Math.round(performance.now() - startMs);
-        logger.debug(`[recommendations] cache hit uid=${userId} elapsed=${elapsedMs}ms`);
-        return {
-          ...cached,
-          meta: {
-            ...cached.meta,
-            performance: { ...cached.meta.performance, cacheHit: true, elapsedMs },
-          },
-        };
-      }
-    }
-
     const context = buildContext();
 
     logger.info(
@@ -1568,6 +1554,26 @@ export const getRecommendations = async (
     const err = new Error("User profile not found");
     err.statusCode = 404;
     throw err;
+  }
+
+  const userReligionEarly = (profile?.religion || "none").toLowerCase().trim();
+  const recCacheKey = `rec:v2:${userId}:${effectiveFast ? "fast" : "full"}:${locationKey}:${
+    experimentActive ? experimentVariant : "off"
+  }:${typeFilterKey}:${modeKey}:rel:${userReligionEarly}`;
+
+  if (!debug) {
+    const cached = recommendationCache.get(recCacheKey);
+    if (cached) {
+      const elapsedMs = Math.round(performance.now() - startMs);
+      logger.debug(`[recommendations] cache hit uid=${userId} elapsed=${elapsedMs}ms`);
+      return {
+        ...cached,
+        meta: {
+          ...cached.meta,
+          performance: { ...cached.meta.performance, cacheHit: true, elapsedMs },
+        },
+      };
+    }
   }
 
   // ── Discover → Events: scraped upcoming events only ─────────────────────────
@@ -1627,7 +1633,7 @@ export const getRecommendations = async (
     };
     const result = { recommendations, context, meta };
     if (!debug) {
-      recommendationCache.set(recCacheKey, result, RECOMMENDATION_CACHE_TTL_MS);
+      recommendationCache.set(recCacheKey, result, recommendationCacheTtl(discoverCategoryKey));
     }
     logger.info(`[recommendations] events feed uid=${userId} count=${recommendations.length}`);
     return result;
@@ -1684,7 +1690,22 @@ export const getRecommendations = async (
   // ── Religion pre-filter ───────────────────────────────────────────────────
   // Hard filter: religious venues are only shown when they match the user's
   // denomination.  Non-religious places are always shown to everyone.
+  // We also stamp denominationType onto each church place so it propagates
+  // to the mobile app (denomination badge, "matched to your religion" chip).
   const userReligion = profile?.religion || null;
+
+  // Enrich church places that don't yet have a denominationType (e.g. Firestore seed data)
+  for (const p of _rawScoringPlaces) {
+    const ptype = (p.type || p.category || "").toLowerCase();
+    if (ptype === "church" && !p.denominationType) {
+      const denom = classifyDenomination(p);
+      if (denom.isReligious) {
+        p.denominationType       = denom.denomination;
+        p.denominationConfidence = denom.confidence;
+      }
+    }
+  }
+
   const scoringPlaces = userReligion && userReligion !== "other" && userReligion !== "prefer_not_to_say"
     ? _rawScoringPlaces.filter((p) => placeAllowedByReligion(p, userReligion))
     : _rawScoringPlaces;
@@ -1768,7 +1789,7 @@ export const getRecommendations = async (
     };
     const result = { recommendations: [], context, meta };
     if (!debug) {
-      recommendationCache.set(recCacheKey, result, RECOMMENDATION_CACHE_TTL_MS);
+      recommendationCache.set(recCacheKey, result, recommendationCacheTtl(discoverCategoryKey));
     }
     return result;
   }
@@ -1966,6 +1987,12 @@ export const getRecommendations = async (
 
     if (images.length) entry.images = images;
     if (photoRefs.length) entry.photoReferences = photoRefs;
+
+    // Carry denomination metadata through to the mobile client
+    if (place.denominationType) {
+      entry.denominationType       = place.denominationType;
+      entry.denominationConfidence = place.denominationConfidence ?? null;
+    }
 
     if (typeof place.userRatingsTotal === "number") {
       entry.userRatingsTotal = place.userRatingsTotal;
@@ -2188,7 +2215,20 @@ export const getRecommendations = async (
   let recommendations = [...pinned, ...others.slice(0, limit - pinned.length)];
 
   // Final order must match score (default: AI-blended score descending).
-  recommendations.sort((a, b) => b.score - a.score);
+  // Photo-availability tiebreaker: when scores are within 1.5 points, prefer
+  // places that have Google photoReferences. Keeps real venues above
+  // photo-less seed entries without disturbing the scoring math.
+  const hasPhoto = (p) =>
+    (Array.isArray(p.photoReferences) && p.photoReferences.length > 0) ||
+    (Array.isArray(p.images) && p.images.length > 0);
+  recommendations.sort((a, b) => {
+    const diff = b.score - a.score;
+    if (Math.abs(diff) > 1.5) return diff;
+    const ap = hasPhoto(a) ? 1 : 0;
+    const bp = hasPhoto(b) ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    return diff;
+  });
 
   // ── Mode override: re-rank the final list for trending / nearby ──────────────
   if (modeFilter === "trending") {
@@ -2317,11 +2357,31 @@ export const getRecommendations = async (
     placesScored:      scoringPlaces.length,
   };
 
-  const result = { recommendations, context, meta };
+  // Final safety net: re-apply strict denomination filter on output (guards cache / AI paths).
+  const userReligionFinal = profile?.religion || null;
+  let finalRecommendations = recommendations;
+  if (
+    userReligionFinal &&
+    userReligionFinal !== "other" &&
+    userReligionFinal !== "prefer_not_to_say"
+  ) {
+    const before = finalRecommendations.length;
+    finalRecommendations = finalRecommendations.filter((rec) =>
+      placeAllowedByReligion(rec, userReligionFinal),
+    );
+    if (before > finalRecommendations.length) {
+      logger.info(
+        `[recommendations] final religion filter uid=${userId} religion=${userReligionFinal} ` +
+        `removed=${before - finalRecommendations.length}`,
+      );
+    }
+  }
+
+  const result = { recommendations: finalRecommendations, context, meta };
 
   // Cache full-mode and fast-mode results separately; never cache debug responses.
   if (!debug) {
-    recommendationCache.set(recCacheKey, result, RECOMMENDATION_CACHE_TTL_MS);
+    recommendationCache.set(recCacheKey, result, recommendationCacheTtl(discoverCategoryKey));
   }
 
   return result;

@@ -139,23 +139,35 @@ class UserProfile(BaseModel):
     weeklyBudget:      float             = 0.0      # numeric ETB
 
 
+class InteractionMemory(BaseModel):
+    """Lightweight memory derived from the user's recent event interactions."""
+    saved_event_ids:      list[str]       = Field(default_factory=list)
+    dismissed_event_ids:  list[str]       = Field(default_factory=list)
+    opened_event_ids:     list[str]       = Field(default_factory=list)
+    liked_categories:     dict[str, float] = Field(default_factory=dict)
+    dismissed_categories: dict[str, float] = Field(default_factory=dict)
+
+
 class EventCandidate(BaseModel):
-    id:          str
-    title:       str
-    category:    str  = "other"
-    date:        str  = ""
-    location:    str  = ""
-    description: str  = ""
-    image:       str  = ""
-    source_url:  str  = ""
-    source:      str  = ""
-    is_paid:     bool = False    # true when the event has an entry fee
-    price_tier:  str  = ""       # cheap|mid|expensive (optional)
+    id:           str
+    title:        str
+    category:     str  = "other"
+    date:         str  = ""
+    location:     str  = ""
+    description:  str  = ""
+    image:        str  = ""
+    source_url:   str  = ""
+    source:       str  = ""
+    is_paid:      bool = False    # true when the event has an entry fee
+    price_tier:   str  = ""       # cheap|mid|expensive (optional)
+    ticket_price: str  = ""       # display string (e.g. "ETB 500", "Free")
+    organizer:    str  = ""
 
 
 class RankEventsRequest(BaseModel):
-    user_id:      str         = ""
-    user_profile: UserProfile = UserProfile()
+    user_id:      str                = ""
+    user_profile: UserProfile        = UserProfile()
+    memory:       InteractionMemory  = InteractionMemory()
     events:       list[EventCandidate] = Field(default_factory=list)
 
 
@@ -188,20 +200,94 @@ def _activity_event_match(weekly_activities: list[str], event_title: str, event_
     return min(0.12, (matched / total) * 0.20)
 
 
-def _budget_event_score(user_budget_tier: str, event: EventCandidate) -> float:
-    """Returns penalty when a paid event is too expensive for the user's budget."""
-    if not event.is_paid or not user_budget_tier:
+def _trusted_source_score(source: str) -> tuple[float, str]:
+    """Boost structured ticketing platforms over Telegram scrapes."""
+    s = (source or "").lower()
+    if "chapa_events" in s:
+        return 0.12, "from Chapa Events"
+    if "eventbrite" in s:
+        return 0.07, "on Eventbrite"
+    if s.startswith("meetup"):
+        return 0.06, "on Meetup"
+    if "eth_local" in s:
+        return 0.04, "local venue listing"
+    if s.startswith("telegram_"):
+        return -0.04, ""
+    return 0.0, ""
+
+
+def _parse_etb_price(ticket_price: str) -> float | None:
+    """Extract numeric ETB value from a display string like 'ETB 500' or 'USD 20'."""
+    if not ticket_price:
+        return None
+    t = ticket_price.lower().strip()
+    if t in ("free", "free entry", "gratis"):
         return 0.0
-    event_tier = (event.price_tier or "mid").lower()
-    order = {"cheap": 0, "mid": 1, "expensive": 2}
-    u = order.get(user_budget_tier, 1)
-    e = order.get(event_tier, 1)
-    diff = e - u
-    if diff <= 0:
-        return 0.04   # affordable or cheaper paid event → small boost
-    if diff == 1:
-        return -0.10  # one tier above budget
-    return -0.25      # luxury event for cheap user
+    import re as _re
+    m = _re.search(r"([\d][\d,\.]*)", ticket_price)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1).replace(",", ""))
+        if "usd" in t or "$" in ticket_price:
+            val *= 130.0  # rough ETB conversion
+        return val
+    except ValueError:
+        return None
+
+
+def _budget_event_score(user_budget_tier: str, event: EventCandidate) -> float:
+    """
+    Returns a score adjustment for budget fit. Budget tiers:
+      cheap     → ≤ ETB 500 free/cheap events strongly preferred; expensive = hard block
+      mid       → ETB 500–2500 comfortable; expensive = soft penalty
+      expensive → no restrictions
+    """
+    if not user_budget_tier:
+        return 0.0
+
+    etb = _parse_etb_price(event.ticket_price)
+    is_free = (etb is not None and etb == 0.0) or not event.is_paid
+
+    if user_budget_tier == "cheap":
+        if is_free:
+            return 0.10  # strong boost for free events
+        if etb is not None:
+            if etb <= 300:
+                return 0.07
+            if etb <= 800:
+                return 0.00
+            if etb <= 2500:
+                return -0.15
+            return -0.40   # hard block: luxury for cheap user
+        # No price info — infer from tier
+        event_tier = (event.price_tier or "mid").lower()
+        if event_tier == "cheap":
+            return 0.05
+        if event_tier == "mid":
+            return -0.08
+        return -0.35       # expensive tier for cheap user
+
+    if user_budget_tier == "mid":
+        if is_free:
+            return 0.05
+        if etb is not None:
+            if etb <= 2500:
+                return 0.04
+            if etb <= 6000:
+                return -0.08
+            return -0.20   # very expensive for mid user
+        event_tier = (event.price_tier or "mid").lower()
+        if event_tier == "cheap":
+            return 0.04
+        if event_tier == "mid":
+            return 0.02
+        return -0.12
+
+    # expensive budget — accept everything, small boost for paid premium
+    if event.is_paid and (event.price_tier or "").lower() == "expensive":
+        return 0.04
+    return 0.02
 
 
 def _gender_event_score(user_gender: str, event_text: str) -> float:
@@ -218,59 +304,125 @@ def _gender_event_score(user_gender: str, event_text: str) -> float:
     return 0.0
 
 
-def _score_event(event: EventCandidate, profile: UserProfile) -> float:
+def _daily_routine_event_match(daily_routine: dict, event: EventCandidate) -> float:
+    """
+    Boost events that align with daily routine slots.
+    daily_routine keys: morning / afternoon / evening / night → list of activity strings.
+    """
+    if not daily_routine:
+        return 0.0
+    all_acts: list[str] = []
+    for activities in daily_routine.values():
+        if isinstance(activities, list):
+            all_acts.extend(activities)
+    if not all_acts:
+        return 0.0
+    return _activity_event_match(all_acts, event.title, event.description, event.category)
+
+
+def _score_event(
+    event: EventCandidate,
+    profile: UserProfile,
+    memory: "InteractionMemory",
+) -> tuple[float, list[str]]:
     """
     Full onboarding-driven event scoring.
+    Returns (score, reasons[]) where reasons describe which boosts fired.
+
+    Weight budget:
+      0.30 — category affinity (typeAffinity)
+      0.25 — interest + eventInterest keyword match
+      0.18 — temporal relevance (sooner = better)
+      0.12 — trusted source signal
+      0.15 — religion / budget / gender / weekly routine bonuses
     """
     score = 0.0
+    reasons: list[str] = []
 
-    # 1. Type affinity
+    # 1. Type affinity (from onboarding place-type + explicit event affinity)
     raw_affinity = profile.typeAffinity.get(event.category, 0.0)
-    affinity = (raw_affinity + 50.0) / 100.0 if (raw_affinity > 1.0 or raw_affinity < 0.0) else raw_affinity
-    score += 0.35 * max(0.0, min(affinity, 1.0))
+    # Normalise: backend sometimes sends -100..100 Elo-style scores
+    if raw_affinity > 1.0 or raw_affinity < 0.0:
+        affinity = (raw_affinity + 50.0) / 100.0
+    else:
+        affinity = raw_affinity
+    affinity = max(0.0, min(affinity, 1.0))
+    score += 0.30 * affinity
+    if affinity >= 0.55:
+        reasons.append(f"matches your {event.category} interests")
 
-    # 2. Combined interest + activity keyword match
+    # 2. Interest keyword match (interests + eventInterests combined)
     text = f"{event.title} {event.description} {event.category}".lower()
     all_interests = list(profile.interests) + list(profile.eventInterests)
+    matched_terms: list[str] = []
     if all_interests:
-        matched = sum(1 for i in all_interests if i.lower() in text)
-        score += 0.30 * min(matched / len(all_interests), 1.0)
+        for i in all_interests:
+            kw = (i or "").lower()
+            if kw and len(kw) >= 3 and kw in text:
+                matched_terms.append(i)
+        interest_ratio = min(len(matched_terms) / max(len(all_interests), 1), 1.0)
+        score += 0.25 * interest_ratio
+        if matched_terms:
+            head = ", ".join(matched_terms[:2])
+            reasons.append(f"aligns with {head}")
 
-    # Activity alignment boost (additive on top of interests)
-    score = min(1.0, score + _activity_event_match(
+    # 3. Weekly activity alignment
+    act_boost = _activity_event_match(
         profile.weeklyActivities, event.title, event.description, event.category
-    ))
+    )
+    # Daily routine alignment (additive)
+    routine_boost = _daily_routine_event_match(profile.dailyRoutine, event)
+    combined_act = min(0.14, act_boost + routine_boost * 0.5)
+    if combined_act > 0:
+        score = min(1.0, score + combined_act)
+        reasons.append("fits your daily routine")
 
-    # 3. Temporal relevance
+    # 4. Temporal relevance — sooner is better, capped at 18% contribution
     days = _days_until(event.date)
     if days < 0:
         temporal = 0.0
+    elif days <= 3:
+        temporal = 1.0
     elif days <= 14:
-        temporal = 1.0 - (days / 14.0) * 0.3
+        temporal = 0.85 - (days / 14.0) * 0.25
+    elif days <= 30:
+        temporal = 0.55
     elif days <= 60:
-        temporal = 0.5
+        temporal = 0.35
     else:
-        temporal = 0.2
-    score += 0.20 * temporal
+        temporal = 0.15
+    score += 0.18 * temporal
+    if 0 <= days <= 2:
+        reasons.append("happening very soon")
+    elif 0 <= days <= 7:
+        reasons.append("this week")
+    elif 0 <= days <= 14:
+        reasons.append("coming up soon")
 
-    # 4. Religion match / hard filter
+    # 5. Religion match / hard filter
     event_religion = _classify_event_religion(event.title, event.description, event.category)
     rel_adj = _religion_event_score(profile.religion, event_religion)
+    if rel_adj <= -0.4:
+        reasons.append("filtered by faith preference")
+    elif rel_adj >= 0.05 and event_religion:
+        reasons.append(f"matches your {event_religion} community")
     score = max(0.0, min(1.0, score + rel_adj))
 
-    # 5. Weekend preference boost
+    # 6. Weekend preference boost
     wp  = (profile.weekendPreference or "").lower()
     cat = event.category.lower()
-    if wp == "outdoor" and cat in ("outdoor", "hiking", "sports", "nature"):
-        score = min(1.0, score + 0.06)
-    elif wp == "hiking" and cat in ("hiking", "outdoor", "nature"):
-        score = min(1.0, score + 0.06)
-    elif wp == "indoor" and cat in ("indoor", "cinema", "art", "museum", "workshop", "tech"):
-        score = min(1.0, score + 0.05)
-    elif wp == "social" and cat in ("social", "networking", "community"):
-        score = min(1.0, score + 0.05)
+    weekend_kw = {
+        "outdoor":  ("outdoor", "hiking", "sports", "nature", "fitness"),
+        "hiking":   ("hiking", "outdoor", "nature", "fitness"),
+        "indoor":   ("indoor", "cinema", "art", "museum", "workshop", "tech", "food", "music"),
+        "social":   ("social", "networking", "community", "food", "music"),
+    }
+    if wp in weekend_kw and cat in weekend_kw[wp]:
+        bonus = 0.07 if wp in ("outdoor", "hiking") else 0.06
+        score = min(1.0, score + bonus)
+        reasons.append("ideal for your weekends")
 
-    # 6. Budget awareness
+    # 7. Budget awareness (stronger penalty for mismatches)
     budget_tier = (profile.budgetTier or "").lower()
     if not budget_tier and profile.weeklyBudget:
         if profile.weeklyBudget <= 2000:
@@ -279,13 +431,87 @@ def _score_event(event: EventCandidate, profile: UserProfile) -> float:
             budget_tier = "mid"
         else:
             budget_tier = "expensive"
-    score = max(0.0, min(1.0, score + _budget_event_score(budget_tier, event)))
+    bud_adj = _budget_event_score(budget_tier, event)
+    if bud_adj <= -0.30:
+        reasons.append("over budget")
+    elif bud_adj <= -0.08:
+        reasons.append("may be over budget")
+    elif bud_adj >= 0.06 and not event.is_paid:
+        reasons.append("free to attend")
+    elif bud_adj >= 0.04:
+        reasons.append("within your budget")
+    score = max(0.0, min(1.0, score + bud_adj))
 
-    # 7. Gender context
+    # 8. Gender context
     gender_adj = _gender_event_score(profile.gender, text)
     score = max(0.0, score + gender_adj)
 
-    return round(min(score, 1.0), 4)
+    # 9. Interaction memory — boost saved categories, dampen dismissed ones
+    if memory.saved_event_ids and event.id in memory.saved_event_ids:
+        score = min(1.0, score + 0.06)
+        reasons.append("saved earlier")
+    if memory.dismissed_event_ids and event.id in memory.dismissed_event_ids:
+        score = max(0.0, score - 0.50)
+    if memory.opened_event_ids and event.id in memory.opened_event_ids:
+        score = min(1.0, score + 0.03)
+    if memory.liked_categories:
+        boost = memory.liked_categories.get(event.category, 0.0)
+        if boost > 0:
+            score = min(1.0, score + min(boost, 0.10))
+            if boost >= 0.20:
+                reasons.append("similar to events you've saved")
+    if memory.dismissed_categories:
+        pen = memory.dismissed_categories.get(event.category, 0.0)
+        if pen > 0:
+            score = max(0.0, score - min(pen, 0.18))
+
+    # 10. Trusted source signal (Chapa Events, Eventbrite, Meetup > Telegram)
+    trust_adj, trust_reason = _trusted_source_score(event.source)
+    if trust_adj > 0:
+        score = min(1.0, score + trust_adj)
+        if trust_reason:
+            reasons.append(trust_reason)
+    elif trust_adj < 0:
+        score = max(0.0, score + trust_adj)
+
+    return round(min(score, 1.0), 4), reasons
+
+
+def _format_explain(reasons: list[str], event: EventCandidate) -> str:
+    """Build a short, human-readable recommendation reason."""
+    if not reasons:
+        return ""
+    # Prioritise stronger signals first
+    priority = (
+        "filtered by faith preference",
+        "over budget",
+        "similar to events you've saved",
+        "matches your",
+        "aligns with",
+        "fits your weekly routine",
+        "ideal for your weekends",
+        "free to attend",
+        "within your budget",
+        "happening very soon",
+        "this week",
+    )
+    ordered: list[str] = []
+    used: set[str] = set()
+    for prefix in priority:
+        for r in reasons:
+            if r in used:
+                continue
+            if r.startswith(prefix):
+                ordered.append(r)
+                used.add(r)
+    for r in reasons:
+        if r not in used:
+            ordered.append(r)
+            used.add(r)
+    head = ordered[:2]
+    if not head:
+        return ""
+    return "Recommended because it " + " and ".join(head) + "."
 
 
 # ─── Route ───────────────────────────────────────────────────────────────────
@@ -302,29 +528,37 @@ def rank_events(body: RankEventsRequest):
 
     scored = []
     for ev in body.events:
-        s = _score_event(ev, body.user_profile)
+        s, reasons = _score_event(ev, body.user_profile, body.memory)
         scored.append({
-            "id":         ev.id,
-            "title":      ev.title,
-            "category":   ev.category,
-            "date":       ev.date,
-            "location":   ev.location,
-            "image":      ev.image,
-            "source_url": ev.source_url,
-            "score":      s,
+            "id":           ev.id,
+            "title":        ev.title,
+            "category":     ev.category,
+            "date":         ev.date,
+            "location":     ev.location,
+            "image":        ev.image,
+            "source_url":   ev.source_url,
+            "is_paid":      ev.is_paid,
+            "price_tier":   ev.price_tier,
+            "ticket_price": ev.ticket_price,
+            "organizer":    ev.organizer,
+            "score":        s,
+            "reasons":      reasons,
+            "explain":      _format_explain(reasons, ev),
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
 
     logger.info(
         "[events/rank] user=%s candidates=%d top_score=%.3f religion=%s gender=%s "
-        "budget=%s weekend=%s activities=%d",
+        "budget=%s weekend=%s activities=%d saved=%d dismissed=%d",
         body.user_id, len(scored), scored[0]["score"] if scored else 0,
         body.user_profile.religion or "—",
         body.user_profile.gender or "—",
         body.user_profile.budgetTier or "—",
         body.user_profile.weekendPreference or "—",
         len(body.user_profile.weeklyActivities),
+        len(body.memory.saved_event_ids),
+        len(body.memory.dismissed_event_ids),
     )
 
     return {"ranked": scored}

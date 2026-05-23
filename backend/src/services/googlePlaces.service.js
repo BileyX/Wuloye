@@ -34,6 +34,7 @@
 
 import { logger } from "../utils/logger.js";
 import { buildPlacePhotoPaths } from "../utils/placePhotoPaths.js";
+import { classifyDenomination } from "../utils/denominationClassifier.js";
 
 const GOOGLE_API_BASE = "https://maps.googleapis.com/maps/api/place";
 
@@ -171,7 +172,7 @@ const transformPlace = (raw) => {
       ? buildPlacePhotoPaths(raw.place_id, photoReferences, { max: 5, width: 720 })
       : [];
 
-  return {
+  const place = {
     id:               raw.place_id,
     name:             raw.name,
     type:             internalType,
@@ -187,6 +188,18 @@ const transformPlace = (raw) => {
     source:           "google_maps",
     ...(photoReferences.length ? { photoReferences, images } : {}),
   };
+
+  // ── Denomination enrichment for church-type places ────────────────────────
+  if (internalType === "church") {
+    const denom = classifyDenomination(place);
+    if (denom.isReligious) {
+      place.denominationType       = denom.denomination;
+      place.denominationConfidence = denom.confidence;
+      place.denominationEvidence   = denom.evidence;
+    }
+  }
+
+  return place;
 };
 
 // ─── API Fetch ────────────────────────────────────────────────────────────────

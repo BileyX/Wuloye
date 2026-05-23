@@ -127,7 +127,7 @@
   },
   "DMP6Cd5005RjiTG1okgsvAFU5Er1": {
     "gym": {
-      "alpha": 2.0,
+      "alpha": 2.5,
       "beta": 1.0
     },
     "yoga": {
@@ -147,23 +147,23 @@
       "beta": 1.0
     },
     "social": {
-      "alpha": 1.0,
+      "alpha": 4.0,
       "beta": 1.0
     },
     "outdoor": {
-      "alpha": 2.0,
+      "alpha": 3.0,
       "beta": 1.0
     },
     "park": {
-      "alpha": 1.0,
+      "alpha": 3.0,
       "beta": 1.0
     },
     "walk": {
-      "alpha": 2.0,
+      "alpha": 3.5,
       "beta": 1.0
     },
     "study": {
-      "alpha": 2.0,
+      "alpha": 8.0,
       "beta": 1.0
     }
   },
@@ -438,6 +438,132 @@
     },
     "walk": {
       "alpha": 2.0,
+      "beta": 1.0
+    }
+  },
+  "CVLcFcyzxnO2SKlsLGOw9RneSJ93": {
+    "gym": {
+      "alpha": 1.5,
+      "beta": 1.0
+    },
+    "yoga": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "coffee": {
+      "alpha": 2.5,
+      "beta": 1.0
+    },
+    "cafe": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "restaurant": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "social": {
+      "alpha": 2.5,
+      "beta": 1.0
+    },
+    "outdoor": {
+      "alpha": 3.5,
+      "beta": 1.0
+    },
+    "park": {
+      "alpha": 2.0,
+      "beta": 1.0
+    },
+    "walk": {
+      "alpha": 2.5,
+      "beta": 1.0
+    },
+    "study": {
+      "alpha": 1.5,
+      "beta": 1.0
+    }
+  },
+  "OGkrKBRzSwgMCcGNUW0xNLp56Tv1": {
+    "gym": {
+      "alpha": 4.5,
+      "beta": 1.0
+    },
+    "yoga": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "coffee": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "cafe": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "restaurant": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "social": {
+      "alpha": 7.0,
+      "beta": 1.0
+    },
+    "outdoor": {
+      "alpha": 7.5,
+      "beta": 1.0
+    },
+    "park": {
+      "alpha": 4.0,
+      "beta": 1.0
+    },
+    "walk": {
+      "alpha": 1.5,
+      "beta": 1.0
+    },
+    "study": {
+      "alpha": 2.5,
+      "beta": 1.0
+    }
+  },
+  "DtzghnuoQ1NJJOzrRCjpIEbjOxu1": {
+    "gym": {
+      "alpha": 4.5,
+      "beta": 1.0
+    },
+    "yoga": {
+      "alpha": 3.0,
+      "beta": 1.0
+    },
+    "coffee": {
+      "alpha": 3.0,
+      "beta": 1.0
+    },
+    "cafe": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "restaurant": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "social": {
+      "alpha": 1.5,
+      "beta": 1.0
+    },
+    "outdoor": {
+      "alpha": 2.0,
+      "beta": 1.0
+    },
+    "park": {
+      "alpha": 1.5,
+      "beta": 1.0
+    },
+    "walk": {
+      "alpha": 3.0,
+      "beta": 1.0
+    },
+    "study": {
+      "alpha": 1.5,
       "beta": 1.0
     }
   }

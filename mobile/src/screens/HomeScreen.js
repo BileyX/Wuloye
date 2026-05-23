@@ -6,7 +6,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import PlaceCard from "../components/PlaceCard";
 import EmptyState from "../components/EmptyState";
-import Loader from "../components/Loader";
+import PlaceListSkeleton from "../components/PlaceListSkeleton";
 import TopGreetingBanner from "../components/TopGreetingBanner";
 import {
     createInteraction,
@@ -19,6 +19,11 @@ import {
 import { INTERACTION_TYPES } from "../utils/constants";
 import { normalisePlace } from "../utils/recommendationPlaces";
 import { getApiErrorMessage } from "../utils/api";
+import {
+    buildFeedCacheKey,
+    getFeedCache,
+    setFeedCache,
+} from "../utils/feedCache";
 import { useAppTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useNotifications } from "../context/NotificationContext";
@@ -197,11 +202,31 @@ export default function HomeScreen({ navigation }) {
         }, [refreshInbox]),
     );
 
+    const homeCacheKey = useMemo(
+        () =>
+            buildFeedCacheKey({
+                scope: "home",
+                filter: "all",
+                lat: geoLocation?.coords?.latitude ?? null,
+                lng: geoLocation?.coords?.longitude ?? null,
+            }),
+        [geoLocation],
+    );
+
     const fetchData = useCallback(async () => {
-        try {
+        const cached = getFeedCache(homeCacheKey);
+        const hadCache = Boolean(cached?.places?.length);
+        if (hadCache) {
+            setPlaces(cached.places);
+            setAiMeta(cached.aiMeta);
+            setLoading(false);
+            setError("");
+        } else {
             setLoading(true);
             setError("");
+        }
 
+        try {
             const [, recommendationsEnvelope] = await Promise.all([
                 refreshProfile(),
                 getRecommendations(recommendationParams),
@@ -218,6 +243,7 @@ export default function HomeScreen({ navigation }) {
 
             setPlaces(mapped);
             setAiMeta(meta?.ai ?? null);
+            setFeedCache(homeCacheKey, mapped, meta?.ai ?? null);
 
             if (mapped.length > 0) {
                 const impressionItems = mapped.slice(0, 8).map((place) => ({
@@ -232,13 +258,15 @@ export default function HomeScreen({ navigation }) {
                 createInteractionsBatch(impressionItems).catch(() => null);
             }
         } catch (err) {
-            setError(
-                getApiErrorMessage(err, "Unable to load recommendations."),
-            );
+            if (!hadCache) {
+                setError(
+                    getApiErrorMessage(err, "Unable to load recommendations."),
+                );
+            }
         } finally {
             setLoading(false);
         }
-    }, [recommendationParams, refreshProfile]);
+    }, [recommendationParams, refreshProfile, homeCacheKey]);
 
     useEffect(() => {
         if (!geoPrimed) return;
@@ -582,7 +610,9 @@ export default function HomeScreen({ navigation }) {
                     </View>
                 ) : null}
 
-                {loading ? <Loader /> : null}
+                {loading && data.length === 0 ? (
+                    <PlaceListSkeleton variant="home" count={3} />
+                ) : null}
                 {error ? <Text style={styles.errorText}>{error}</Text> : null}
                 {!loading && data.length === 0 ? (
                     <EmptyState
@@ -593,10 +623,14 @@ export default function HomeScreen({ navigation }) {
                 ) : (
                     <FlatList
                         data={data}
-                        keyExtractor={(item) => item.id}
+                        keyExtractor={(item) => String(item.id ?? item.placeId)}
                         showsVerticalScrollIndicator={false}
                         refreshing={refreshing}
                         onRefresh={handleRefresh}
+                        initialNumToRender={3}
+                        maxToRenderPerBatch={4}
+                        windowSize={6}
+                        removeClippedSubviews
                         contentContainerStyle={styles.listContent}
                         renderItem={({ item }) => (
                             <PlaceCard

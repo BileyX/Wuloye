@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 import {
     Animated,
     Pressable,
@@ -11,11 +11,12 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useAppTheme } from "../context/ThemeContext";
 import AuthenticatedPlacePhoto from "./AuthenticatedPlacePhoto";
 import { effectivePricingEnabled } from "../utils/pricingDisplay";
+import { getPlaceVisualMeta } from "../utils/placeVisuals";
 
 /**
  * Discover feed card — like · save · pass. Full actions on detail screen.
  */
-export default function DiscoverCard({
+function DiscoverCard({
     place,
     onPress,
     onPressIn,
@@ -88,80 +89,34 @@ export default function DiscoverCard({
     const llmReason = place?.reason ?? null;
     const aiInsight = llmReason ?? place?.aiInsight ?? null;
 
+    // Denomination badge (church-type places only)
+    const denomType = place?.denominationType ?? null;
+    const religionMatch = place?.matches?.religion !== false;
+    const denomLabel = (() => {
+        if (!denomType || (place?.type || "").toLowerCase() !== "church") return null;
+        switch (denomType) {
+            case "orthodox":   return "Orthodox";
+            case "protestant": return "Protestant";
+            case "catholic":   return "Catholic";
+            case "muslim":     return "Mosque";
+            default:           return null;
+        }
+    })();
+    const denomColor = (() => {
+        switch (denomType) {
+            case "orthodox":   return "#B5651D";
+            case "protestant": return "#3B6FBF";
+            case "catholic":   return "#7B2D8B";
+            case "muslim":     return "#2E8B57";
+            default:           return null;
+        }
+    })();
+
     const thumbPath = place?.images?.[0] ?? null;
-
-    // Generate a pseudo-color for the thumbnail placeholder based on place type
-    const thumbColors = useMemo(() => {
-        const typeLower = typeLabel.toLowerCase();
-        if (typeLower.includes("gym") || typeLower.includes("fitness")) {
-            return isDark
-                ? ["#0e2d4f", "#0b3d4a"]
-                : ["#c8e6ff", "#b8f0de"];
-        }
-        if (
-            typeLower.includes("cafe") ||
-            typeLower.includes("coffee") ||
-            typeLower.includes("restaurant")
-        ) {
-            return isDark
-                ? ["#2d1e0e", "#3d2910"]
-                : ["#ffe8cc", "#fff3e0"];
-        }
-        if (typeLower.includes("hotel") || typeLower.includes("lodging")) {
-            return isDark
-                ? ["#1a1528", "#221a38"]
-                : ["#ede7ff", "#f5f0ff"];
-        }
-        if (
-            typeLower.includes("sport") ||
-            typeLower.includes("stadium") ||
-            typeLower.includes("park")
-        ) {
-            return isDark
-                ? ["#0e2d1a", "#0d3d24"]
-                : ["#d4f5e0", "#e0f8e8"];
-        }
-        if (typeLower.includes("church") || typeLower.includes("worship")) {
-            return isDark
-                ? ["#1a1a2e", "#16213e"]
-                : ["#e8e0ff", "#f0eaff"];
-        }
-        if (typeLower.includes("event") || typeLower.includes("music")) {
-            return isDark
-                ? ["#1a0e2d", "#2d1040"]
-                : ["#ffe0f0", "#fce8ff"];
-        }
-        if (typeLower.includes("workspace") || typeLower.includes("office")) {
-            return isDark
-                ? ["#0d1f0e", "#0e2d14"]
-                : ["#e0f5e8", "#d4f7e0"];
-        }
-        return isDark
-            ? ["#0e1f2d", "#0b2a3a"]
-            : ["#daf0ff", "#e0f8f2"];
-    }, [typeLabel, isDark]);
-
-    const thumbIcon = useMemo(() => {
-        const typeLower = typeLabel.toLowerCase();
-        if (typeLower.includes("gym") || typeLower.includes("fitness")) return "barbell";
-        if (
-            typeLower.includes("cafe") ||
-            typeLower.includes("coffee") ||
-            typeLower.includes("restaurant")
-        )
-            return "cafe";
-        if (typeLower.includes("hotel") || typeLower.includes("lodging")) return "bed";
-        if (
-            typeLower.includes("sport") ||
-            typeLower.includes("stadium") ||
-            typeLower.includes("park")
-        )
-            return "football";
-        if (typeLower.includes("church") || typeLower.includes("worship")) return "business";
-        if (typeLower.includes("event")) return "musical-notes";
-        if (typeLower.includes("workspace") || typeLower.includes("office")) return "briefcase";
-        return "location";
-    }, [typeLabel]);
+    const visualMeta = useMemo(
+        () => getPlaceVisualMeta(typeLabel, isDark),
+        [typeLabel, isDark],
+    );
 
     return (
         <Animated.View style={[styles.wrapper, animStyle]}>
@@ -172,41 +127,49 @@ export default function DiscoverCard({
                     end={{ x: 1, y: 1 }}
                     style={styles.card}
                 >
-                    {thumbPath ? (
-                        <View style={styles.thumbnail}>
+                    <View style={styles.thumbnail}>
+                        <LinearGradient
+                            colors={visualMeta.gradient}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={StyleSheet.absoluteFill}
+                        />
+                        {thumbPath ? (
                             <AuthenticatedPlacePhoto
                                 relativePath={thumbPath}
                                 style={styles.thumbnailImage}
+                                fallbackIcon={visualMeta.icon}
+                                fallbackTint={visualMeta.accent}
                             />
-                            {score ? (
-                                <View style={styles.scorePill}>
-                                    <Text style={styles.scoreText}>{score}</Text>
-                                </View>
-                            ) : null}
-                        </View>
-                    ) : (
-                        <LinearGradient
-                            colors={thumbColors}
-                            style={styles.thumbnail}
-                        >
+                        ) : (
                             <Ionicons
-                                name={thumbIcon}
-                                size={26}
-                                color={palette.oceanBlue}
+                                name={visualMeta.icon}
+                                size={28}
+                                color={visualMeta.accent}
                             />
-                            {score ? (
-                                <View style={styles.scorePill}>
-                                    <Text style={styles.scoreText}>{score}</Text>
-                                </View>
-                            ) : null}
-                        </LinearGradient>
-                    )}
+                        )}
+                        {score ? (
+                            <View style={styles.scorePill}>
+                                <Text style={styles.scoreText}>{score}</Text>
+                            </View>
+                        ) : null}
+                    </View>
 
                     {/* ── Info ── */}
                     <View style={styles.info}>
-                        {/* Type badge */}
-                        <View style={styles.typeBadge}>
-                            <Text style={styles.typeBadgeText}>{typeLabel}</Text>
+                        {/* Type + denomination badges */}
+                        <View style={styles.badgeRow}>
+                            <View style={styles.typeBadge}>
+                                <Text style={styles.typeBadgeText}>{typeLabel}</Text>
+                            </View>
+                            {denomLabel ? (
+                                <View style={[styles.denomChip, { backgroundColor: `${denomColor}15`, borderColor: `${denomColor}40` }]}>
+                                    <Ionicons name="shield-checkmark-outline" size={9} color={denomColor} />
+                                    <Text style={[styles.denomChipText, { color: denomColor }]}>
+                                        {religionMatch ? `Matched · ${denomLabel}` : denomLabel}
+                                    </Text>
+                                </View>
+                            ) : null}
                         </View>
 
                         {/* Name */}
@@ -392,10 +355,12 @@ function createStyles(palette, isDark) {
             elevation: 4,
         },
         thumbnail: {
-            width: 96,
+            width: 108,
+            minHeight: 124,
             alignItems: "center",
             justifyContent: "center",
             position: "relative",
+            overflow: "hidden",
             backgroundColor: isDark ? "rgba(20,40,60,0.5)" : "rgba(230,240,250,0.9)",
         },
         thumbnailImage: {
@@ -421,6 +386,27 @@ function createStyles(palette, isDark) {
             flex: 1,
             padding: 12,
         },
+        badgeRow: {
+            flexDirection: "row",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 5,
+            marginBottom: 4,
+        },
+        denomChip: {
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 3,
+            borderWidth: 1,
+            borderRadius: 9,
+            paddingHorizontal: 6,
+            paddingVertical: 2,
+        },
+        denomChipText: {
+            fontSize: 9,
+            fontWeight: "700",
+            letterSpacing: 0.2,
+        },
         typeBadge: {
             alignSelf: "flex-start",
             backgroundColor: "rgba(31,159,234,0.12)",
@@ -429,7 +415,6 @@ function createStyles(palette, isDark) {
             borderRadius: 8,
             paddingHorizontal: 7,
             paddingVertical: 2,
-            marginBottom: 4,
         },
         typeBadgeText: {
             color: palette.deepBlue,
@@ -562,3 +547,5 @@ function createStyles(palette, isDark) {
         },
     });
 }
+
+export default memo(DiscoverCard);

@@ -10,6 +10,7 @@ import {
     Animated,
     FlatList,
     Image,
+    Linking,
     Pressable,
     RefreshControl,
     ScrollView,
@@ -22,7 +23,15 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import * as Location from "expo-location";
 import { useAppTheme } from "../context/ThemeContext";
-import { getRecommendedEvents, getEvents, prefetchEventById } from "../api/eventsApi";
+import {
+    getRecommendedEvents,
+    getEvents,
+    prefetchEventById,
+    invalidateEventsListCache,
+    invalidateRecoListCache,
+} from "../api/eventsApi";
+import { createInteraction } from "../api/interactionApi";
+import { INTERACTION_TYPES } from "../utils/constants";
 import { getApiErrorMessage } from "../utils/api";
 import { auth } from "../config/firebase";
 import {
@@ -61,6 +70,66 @@ const CATEGORY_FALLBACK_ICONS = {
     sport:     "football-outline",
 };
 
+// ─── Feed pills (curated views on top of the same event list) ─────────────────
+
+const FEEDS = [
+    { key: "for_you",    label: "For You",    icon: "sparkles-outline" },
+    { key: "free",       label: "Free",       icon: "pricetag-outline" },
+    { key: "affordable", label: "Affordable", icon: "wallet-outline" },
+    { key: "weekend",    label: "Weekend",    icon: "sunny-outline" },
+    { key: "nearby",     label: "Nearby",     icon: "navigate-outline" },
+    { key: "trending",   label: "Trending",   icon: "flame-outline" },
+];
+
+function isFreeEvent(event) {
+    const tier  = String(event?.price_tier || event?.priceTier || "").toLowerCase();
+    const price = String(event?.ticket_price || event?.ticketPrice || "").toLowerCase();
+    if (price === "free" || price === "free entry" || price === "gratis") return true;
+    if (event?.is_paid === false || event?.isPaid === false) {
+        if (!price || price === "free") return true;
+    }
+    if (tier === "cheap" && (!price || price === "free")) return true;
+    return false;
+}
+
+function isAffordableEvent(event) {
+    // ETB ≤ 800 or free — suitable for mid/cheap budgets
+    if (isFreeEvent(event)) return true;
+    const price = String(event?.ticket_price || event?.ticketPrice || "");
+    const m = price.match(/([\d][\d,.]*)/);
+    if (m) {
+        const val = parseFloat(m[1].replace(/,/g, ""));
+        if (!isNaN(val) && val <= 800) return true;
+    }
+    const tier = String(event?.price_tier || event?.priceTier || "").toLowerCase();
+    return tier === "cheap";
+}
+
+function isWeekendEvent(event) {
+    if (!event?.date) return false;
+    try {
+        const d = new Date(event.date);
+        const day = d.getDay();
+        return day === 0 || day === 5 || day === 6; // Fri/Sat/Sun
+    } catch {
+        return false;
+    }
+}
+
+function eventDistanceKm(event, userLoc) {
+    const coords = event?.coordinates;
+    if (!userLoc || !coords?.lat || !coords?.lng) return null;
+    const R = 6371;
+    const dLat = ((coords.lat - userLoc.lat) * Math.PI) / 180;
+    const dLng = ((coords.lng - userLoc.lng) * Math.PI) / 180;
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos((userLoc.lat * Math.PI) / 180) *
+            Math.cos((coords.lat * Math.PI) / 180) *
+            Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 // ─── Date formatter ───────────────────────────────────────────────────────────
 
 function formatEventDate(isoDate) {
@@ -80,42 +149,137 @@ function formatEventDate(isoDate) {
 
 // ─── Event Card ───────────────────────────────────────────────────────────────
 
-function EventCard({ event, onPress, onPressIn, palette, isDark }) {
-    const resolvedHttps = useMemo(
-        () => resolveEventThumbnailUri(event),
-        [event],
+function EventSkeletonCard({ palette, isDark }) {
+    const surface = isDark ? "rgba(14,28,50,0.55)" : "rgba(255,255,255,0.78)";
+    const block = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)";
+    return (
+        <View
+            style={[
+                styles.card,
+                {
+                    backgroundColor: surface,
+                    borderColor: palette.borderSoft,
+                },
+            ]}
+        >
+            <View style={[styles.cardImage, { backgroundColor: block }]} />
+            <View style={styles.cardBody}>
+                <View style={{ height: 14, width: "75%", backgroundColor: block, borderRadius: 6 }} />
+                <View style={{ height: 10, width: "50%", backgroundColor: block, borderRadius: 6, marginTop: 10 }} />
+                <View style={{ height: 10, width: "40%", backgroundColor: block, borderRadius: 6, marginTop: 6 }} />
+            </View>
+        </View>
     );
-    const rawImageTrim =
-        typeof event?.image === "string" ? event.image.trim() : "";
-    const rawHttpFallback =
-        rawImageTrim.startsWith("http://") ? rawImageTrim : "";
+}
 
-    const [tryHttpFallback, setTryHttpFallback] = useState(false);
-    const [imgFailed, setImgFailed] = useState(false);
+// ─── Source label helpers ─────────────────────────────────────────────────────
 
-    const displayUri = tryHttpFallback && rawHttpFallback ? rawHttpFallback : resolvedHttps;
-    const showRemote = Boolean(displayUri && !imgFailed);
+const SOURCE_META = {
+    chapa_events:    { label: "Chapa Events",    color: "#F59E0B" },
+    eventbrite:      { label: "Eventbrite",      color: "#F05537" },
+    meetup:          { label: "Meetup",           color: "#ED1C40" },
+    alladdisevents:  { label: "AllAddisEvents",   color: "#2563EB" },
+    whatsupaddis:    { label: "WhatsUpAddis",     color: "#7C3AED" },
+    british_council: { label: "British Council",  color: "#012169" },
+    icc_addis:       { label: "ICC Addis",        color: "#1D4ED8" },
+};
+
+function getSourceMeta(event) {
+    const src = String(event?.source || "").toLowerCase();
+    for (const [key, meta] of Object.entries(SOURCE_META)) {
+        if (src.includes(key)) return meta;
+    }
+    if (src.startsWith("eth_local_")) {
+        return { label: "Local", color: "#059669" };
+    }
+    if (src.startsWith("eth_rss_") || src.startsWith("rss_feed")) {
+        return { label: "News", color: "#64748B" };
+    }
+    if (src.startsWith("telegram_")) {
+        return { label: "Telegram", color: "#229ED9" };
+    }
+    return null;
+}
+
+/** Higher = show first. Matches backend SOURCE_TRUST_SCORE. */
+function sourceTrustScore(event) {
+    const s = String(event?.source || "").toLowerCase();
+    if (s.includes("chapa")) return 105;
+    if (s.includes("eventbrite")) return 100;
+    if (s.startsWith("meetup")) return 92;
+    if (s.includes("eth_local")) return 95;
+    if (s.includes("eth_rss")) return 90;
+    if (s.includes("alladdis") || s.includes("whatsup")) return 88;
+    if (s.startsWith("telegram_")) return 55;
+    return 45;
+}
+
+function sortByTrustThenDate(list) {
+    return [...list].sort((a, b) => {
+        const t = sourceTrustScore(b) - sourceTrustScore(a);
+        if (t !== 0) return t;
+        const ad = a.date || a.created_at || "";
+        const bd = b.date || b.created_at || "";
+        return String(ad).localeCompare(String(bd));
+    });
+}
+
+function openBookingUrl(event) {
+    const url = event?.booking_url || event?.source_url;
+    if (url) Linking.openURL(url).catch(() => {});
+}
+
+function hasBookingUrl(event) {
+    return Boolean(event?.booking_url || event?.source_url);
+}
+
+function priceBadgeMeta(event) {
+    const price = String(event?.ticket_price || event?.ticketPrice || "").trim();
+    const tier = String(event?.price_tier || event?.priceTier || "").toLowerCase();
+    const isPaid = Boolean(event?.is_paid ?? event?.isPaid);
+    if (price.toLowerCase() === "free" || (!isPaid && tier === "cheap" && !price)) {
+        return { label: "Free", bg: "#10B98122", fg: "#0F9B6E" };
+    }
+    if (price) return { label: price, bg: "rgba(0,0,0,0.45)", fg: "#fff" };
+    if (tier === "expensive") return { label: "Premium", bg: "#F59E0B22", fg: "#B45309" };
+    if (tier === "mid") return { label: "Mid", bg: "rgba(0,0,0,0.45)", fg: "#fff" };
+    return null;
+}
+
+function EventCard({ event, onPress, onPressIn, palette, isDark }) {
+    const resolvedUri = useMemo(() => resolveEventThumbnailUri(event), [event]);
+
+    // Fallback chain: https → http → gradient placeholder
+    const rawTrim = typeof event?.image === "string" ? event.image.trim() : "";
+    const httpFallback = rawTrim.startsWith("http://") ? rawTrim : "";
+
+    const [imgState, setImgState] = useState("loading"); // loading | ok | http | failed
 
     useEffect(() => {
-        setTryHttpFallback(false);
-        setImgFailed(false);
-    }, [event?.id, resolvedHttps]);
+        setImgState(resolvedUri ? "loading" : "failed");
+    }, [event?.id, resolvedUri]);
 
-    const cardBg = isDark
-        ? "rgba(14, 28, 50, 0.92)"
-        : "rgba(255, 255, 255, 0.88)";
+    const displayUri =
+        imgState === "http" && httpFallback
+            ? httpFallback
+            : resolvedUri;
+    const showRemote = Boolean(displayUri && imgState !== "failed");
 
-    const [g0, g1] = eventPlaceholderGradientColors(event);
-    const catIcon =
-        CATEGORY_FALLBACK_ICONS[event.category] || CATEGORY_FALLBACK_ICONS.other;
-
+    const onImageLoad  = useCallback(() => setImgState("ok"),    []);
     const onImageError = useCallback(() => {
-        if (!tryHttpFallback && rawHttpFallback && resolvedHttps !== rawHttpFallback) {
-            setTryHttpFallback(true);
-            return;
+        if (imgState === "loading" && httpFallback && httpFallback !== resolvedUri) {
+            setImgState("http");
+        } else {
+            setImgState("failed");
         }
-        setImgFailed(true);
-    }, [tryHttpFallback, rawHttpFallback, resolvedHttps]);
+    }, [imgState, httpFallback, resolvedUri]);
+
+    const isChapa = String(event?.source || "").toLowerCase().includes("chapa");
+    const cardBg  = isDark ? "rgba(14,28,50,0.94)" : "rgba(255,255,255,0.92)";
+    const [g0, g1] = eventPlaceholderGradientColors(event);
+    const catIcon = CATEGORY_FALLBACK_ICONS[event.category] || CATEGORY_FALLBACK_ICONS.other;
+    const sourceMeta = getSourceMeta(event);
+    const priceMeta  = priceBadgeMeta(event);
 
     return (
         <Pressable
@@ -125,69 +289,157 @@ function EventCard({ event, onPress, onPressIn, palette, isDark }) {
                 styles.card,
                 {
                     backgroundColor: cardBg,
-                    borderColor: palette.borderSoft,
-                    opacity: pressed ? 0.9 : 1,
-                    transform: [{ scale: pressed ? 0.98 : 1 }],
+                    borderColor: isChapa
+                        ? "#F59E0B55"
+                        : palette.borderSoft,
+                    borderWidth: isChapa ? 1.5 : 1,
+                    opacity: pressed ? 0.88 : 1,
+                    transform: [{ scale: pressed ? 0.975 : 1 }],
                 },
             ]}
         >
+            {/* ── Image ─────────────────────────────────────────────────────── */}
             <View style={styles.cardImage}>
                 {showRemote ? (
                     <Image
                         source={{ uri: displayUri }}
                         style={StyleSheet.absoluteFillObject}
                         resizeMode="cover"
+                        onLoad={onImageLoad}
                         onError={onImageError}
                     />
-                ) : (
-                    <LinearGradient
-                        colors={[g0, g1]}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={StyleSheet.absoluteFillObject}
-                    >
-                        <View style={styles.cardImageIconWrap}>
-                            <Ionicons
-                                name={catIcon}
-                                size={42}
-                                color="rgba(255,255,255,0.88)"
-                            />
-                        </View>
-                    </LinearGradient>
+                ) : null}
+
+                {/* Gradient placeholder always rendered behind image */}
+                <LinearGradient
+                    colors={[g0, g1]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={[StyleSheet.absoluteFillObject, showRemote && imgState === "ok" ? { opacity: 0 } : {}]}
+                >
+                    <View style={styles.cardImageIconWrap}>
+                        <Ionicons name={catIcon} size={44} color="rgba(255,255,255,0.80)" />
+                    </View>
+                </LinearGradient>
+
+                {/* Bottom scrim so category badge stays readable over photos */}
+                <LinearGradient
+                    colors={["transparent", "rgba(0,0,0,0.55)"]}
+                    style={styles.cardImageScrim}
+                    pointerEvents="none"
+                />
+
+                {/* Category badge — bottom-left over scrim */}
+                <View style={styles.categoryBadgeOverlay}>
+                    <View style={[styles.categoryBadge, { backgroundColor: palette.oceanBlue + "DD" }]}>
+                        <Ionicons name={catIcon} size={10} color="#fff" style={{ marginRight: 3 }} />
+                        <Text style={styles.categoryBadgeText}>
+                            {(event.category || "other").toUpperCase()}
+                        </Text>
+                    </View>
+                </View>
+
+                {/* Price badge — top-right */}
+                {priceMeta && (
+                    <View style={[styles.priceBadge, { backgroundColor: priceMeta.bg }]}>
+                        <Text style={[styles.priceBadgeText, { color: priceMeta.fg }]} numberOfLines={1}>
+                            {priceMeta.label}
+                        </Text>
+                    </View>
                 )}
             </View>
 
-            {/* Category badge */}
-            <View style={[styles.categoryBadge, { backgroundColor: palette.oceanBlue }]}>
-                <Text style={styles.categoryBadgeText}>
-                    {(event.category || "other").toUpperCase()}
-                </Text>
-            </View>
-
-            {/* Details */}
+            {/* ── Details ───────────────────────────────────────────────────── */}
             <View style={styles.cardBody}>
-                <Text
-                    style={[styles.cardTitle, { color: palette.textPrimary }]}
-                    numberOfLines={2}
-                >
+                <Text style={[styles.cardTitle, { color: palette.textPrimary }]} numberOfLines={2}>
                     {event.title}
                 </Text>
 
                 <View style={styles.cardMeta}>
                     <Ionicons name="calendar-outline" size={13} color={palette.textMuted} />
                     <Text style={[styles.cardMetaText, { color: palette.textMuted }]}>
-                        {" "}{formatEventDate(event.date)}
+                        {"  "}{formatEventDate(event.date)}
                     </Text>
                 </View>
 
-                <View style={[styles.cardMeta, { marginTop: 4 }]}>
+                <View style={[styles.cardMeta, { marginTop: 3 }]}>
                     <Ionicons name="location-outline" size={13} color={palette.textMuted} />
                     <Text
                         style={[styles.cardMetaText, { color: palette.textMuted }]}
                         numberOfLines={1}
                     >
-                        {" "}{event.location || "Ethiopia"}
+                        {"  "}{event.location || "Ethiopia"}
                     </Text>
+                </View>
+
+                {/* AI explanation row */}
+                {!!event?.explain && (
+                    <View
+                        style={[
+                            styles.reasonRow,
+                            {
+                                backgroundColor: isDark
+                                    ? "rgba(96,165,250,0.12)"
+                                    : "rgba(37,99,235,0.07)",
+                            },
+                        ]}
+                    >
+                        <Ionicons
+                            name="sparkles-outline"
+                            size={11}
+                            color={isDark ? "#93C5FD" : "#1D4ED8"}
+                        />
+                        <Text
+                            style={[styles.reasonText, { color: isDark ? "#BFDBFE" : "#1E3A8A" }]}
+                            numberOfLines={2}
+                        >
+                            {"  "}{event.explain}
+                        </Text>
+                    </View>
+                )}
+
+                {/* Source badge + Book button */}
+                <View style={styles.cardFooter}>
+                    {sourceMeta ? (
+                        <View style={[styles.sourceBadge, { backgroundColor: sourceMeta.color + "22" }]}>
+                            <View style={[styles.sourceDot, { backgroundColor: sourceMeta.color }]} />
+                            <Text style={[styles.sourceBadgeText, { color: sourceMeta.color }]}>
+                                {sourceMeta.label}
+                            </Text>
+                        </View>
+                    ) : <View />}
+
+                    {hasBookingUrl(event) && (
+                        <Pressable
+                            onPress={(e) => { e.stopPropagation?.(); openBookingUrl(event); }}
+                            style={[
+                                styles.bookBtn,
+                                {
+                                    backgroundColor: isChapa
+                                        ? "#F59E0B18"
+                                        : palette.oceanBlue + "14",
+                                    borderColor: isChapa
+                                        ? "#F59E0B"
+                                        : palette.oceanBlue,
+                                },
+                            ]}
+                            hitSlop={8}
+                        >
+                            <Ionicons
+                                name="ticket-outline"
+                                size={12}
+                                color={isChapa ? "#F59E0B" : palette.oceanBlue}
+                            />
+                            <Text
+                                style={[
+                                    styles.bookBtnText,
+                                    { color: isChapa ? "#F59E0B" : palette.oceanBlue },
+                                ]}
+                            >
+                                {isChapa ? "Book on Chapa" : "Book"}
+                            </Text>
+                        </Pressable>
+                    )}
                 </View>
             </View>
         </Pressable>
@@ -200,13 +452,17 @@ export default function EventsScreen({ navigation }) {
     const { palette, gradients, isDark } = useAppTheme();
     const styles2 = useMemo(() => createStyles(palette, isDark), [palette, isDark]);
 
-    const [events, setEvents] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [refreshing, setRefreshing] = useState(false);
-    const [error, setError] = useState(null);
+    // `recoEvents`  — personalized AI list (~15 events) used for "For You" feed
+    // `allEvents`   — broad unfiltered pool (~100 events) used for category chips + other feeds
+    const [recoEvents, setRecoEvents]  = useState([]);
+    const [allEvents,  setAllEvents]   = useState([]);
+    const [loading, setLoading]        = useState(true);
+    const [refreshing, setRefreshing]  = useState(false);
+    const [error, setError]            = useState(null);
     const [activeCategory, setActiveCategory] = useState("all");
-    const [userLocation, setUserLocation] = useState(null);
-    const [cityName, setCityName] = useState(null);
+    const [activeFeed, setActiveFeed]         = useState("for_you");
+    const [userLocation, setUserLocation]     = useState(null);
+    const [cityName, setCityName]             = useState(null);
 
     const fadeAnim = useRef(new Animated.Value(0)).current;
 
@@ -240,24 +496,40 @@ export default function EventsScreen({ navigation }) {
         if (!isRefresh) setLoading(true);
         setError(null);
 
-        try {
-            let result;
-            const locationParams = userLocation
-                ? { lat: userLocation.lat, lng: userLocation.lng }
-                : {};
+        const locationParams = userLocation
+            ? { lat: userLocation.lat, lng: userLocation.lng }
+            : {};
 
+        try {
+            // Always fetch the broad unfiltered pool — this powers category chips
+            // and feed filters with a large, diverse set of events.
+            const allResult = await getEvents({
+                limit: 100,
+                refresh: isRefresh ? "1" : undefined,
+                ...locationParams,
+            });
+            const broadList = allResult?.events || [];
+            setAllEvents(sortByTrustThenDate(broadList));
+
+            // Separately fetch personalized recommendations for the "For You" tab.
             if (auth.currentUser) {
                 try {
-                    result = await getRecommendedEvents();
+                    const recoResult = await getRecommendedEvents();
+                    const recoList = recoResult?.events || [];
+                    // Merge: show reco events first, then pad with broad events not already included.
+                    if (recoList.length >= 3) {
+                        const recoIds = new Set(recoList.map((e) => e.id));
+                        const extra = broadList.filter((e) => !recoIds.has(e.id)).slice(0, 15);
+                        setRecoEvents(sortByTrustThenDate([...recoList, ...extra]));
+                    } else {
+                        setRecoEvents(sortByTrustThenDate(broadList));
+                    }
                 } catch {
-                    result = await getEvents({ limit: 50, ...locationParams });
+                    setRecoEvents(sortByTrustThenDate(broadList));
                 }
             } else {
-                result = await getEvents({ limit: 50, ...locationParams });
+                setRecoEvents(sortByTrustThenDate(broadList));
             }
-
-            const list = result?.events || [];
-            setEvents(list);
 
             Animated.timing(fadeAnim, {
                 toValue: 1,
@@ -277,6 +549,9 @@ export default function EventsScreen({ navigation }) {
     }, [fetchEvents]);
 
     const onRefresh = useCallback(() => {
+        // Bust both mobile-side caches so fresh data is fetched from the backend.
+        invalidateEventsListCache();
+        invalidateRecoListCache();
         setRefreshing(true);
         fetchEvents(true);
     }, [fetchEvents]);
@@ -284,13 +559,89 @@ export default function EventsScreen({ navigation }) {
     // ── Filtered events ────────────────────────────────────────────────────────
 
     const displayed = useMemo(() => {
-        if (activeCategory === "all") return events;
-        return events.filter((e) => e.category === activeCategory);
-    }, [events, activeCategory]);
+        // "For You" feed uses the personalized reco pool.
+        // All other feeds + category chips use the full broad pool (100 events)
+        // so they always have enough events to filter through.
+        const basePool = activeFeed === "for_you" && activeCategory === "all"
+            ? recoEvents
+            : allEvents;
+
+        // Strict category filter — each chip maps to a closed set of category values.
+        // Tech conferences must NOT appear in music; church events must NOT appear in social.
+        const CATEGORY_ALIASES = {
+            all:       null,  // no filter
+            music:     ["music"],
+            sports:    ["sports"],
+            fitness:   ["fitness"],
+            tech:      ["tech"],
+            business:  ["business"],
+            church:    ["church"],
+            food:      ["food"],
+            art:       ["art"],
+            social:    ["social"],
+            education: ["education"],
+            other:     ["other"],
+        };
+        const allowed = CATEGORY_ALIASES[activeCategory] ?? null;
+        let list = allowed === null
+            ? basePool
+            : basePool.filter((e) => {
+                const cat = String(e.category || "other").toLowerCase();
+                return allowed.includes(cat);
+            });
+
+        switch (activeFeed) {
+            case "free":
+                list = list.filter(isFreeEvent);
+                break;
+            case "affordable":
+                list = list.filter(isAffordableEvent);
+                break;
+            case "weekend":
+                list = list.filter(isWeekendEvent);
+                break;
+            case "nearby":
+                if (userLocation) {
+                    list = list
+                        .map((e) => ({ e, d: eventDistanceKm(e, userLocation) }))
+                        .filter((x) => x.d != null && x.d <= 60)
+                        .sort((a, b) => a.d - b.d)
+                        .map((x) => x.e);
+                }
+                break;
+            case "trending":
+                list = [...list].sort((a, b) => {
+                    const sa = typeof a?.score === "number" ? a.score : 0;
+                    const sb = typeof b?.score === "number" ? b.score : 0;
+                    if (Math.abs(sb - sa) > 0.01) return sb - sa;
+                    // Tiebreak: trusted sources surface first
+                    const trust = sourceTrustScore(b) - sourceTrustScore(a);
+                    if (trust !== 0) return trust;
+                    return new Date(a.date) - new Date(b.date);
+                });
+                break;
+            case "for_you":
+            default:
+                break;
+        }
+
+        // Chapa / Eventbrite / Meetup always surface before Telegram in every feed.
+        if (activeFeed !== "trending") {
+            list = sortByTrustThenDate(list);
+        }
+        return list;
+    }, [recoEvents, allEvents, activeCategory, activeFeed, userLocation]);
 
     // ── Handlers ───────────────────────────────────────────────────────────────
 
     const handleCardPress = useCallback((event) => {
+        if (event?.id && auth.currentUser) {
+            createInteraction({
+                placeId: event.id,
+                actionType: INTERACTION_TYPES.OPEN_EVENT,
+                metadata: { category: event.category || "other", source: event.source || "" },
+            }).catch(() => {});
+        }
         navigation.navigate("EventDetail", { event });
     }, [navigation]);
 
@@ -337,6 +688,52 @@ export default function EventsScreen({ navigation }) {
                     </View>
                 </View>
 
+                {/* Feed pills */}
+                <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles2.chipsRow}
+                    style={styles2.feedScroll}
+                >
+                    {FEEDS.map((feed) => {
+                        const active = activeFeed === feed.key;
+                        const muted = feed.key === "nearby" && !userLocation;
+                        return (
+                            <Pressable
+                                key={feed.key}
+                                disabled={muted}
+                                onPress={() => setActiveFeed(feed.key)}
+                                style={[
+                                    styles2.feedChip,
+                                    {
+                                        backgroundColor: active
+                                            ? palette.oceanBlue
+                                            : muted
+                                                ? palette.surface
+                                                : palette.surface,
+                                        borderColor: active ? palette.oceanBlue : palette.borderSoft,
+                                        opacity: muted ? 0.55 : 1,
+                                    },
+                                ]}
+                            >
+                                <Ionicons
+                                    name={feed.icon}
+                                    size={14}
+                                    color={active ? "#fff" : palette.textSecondary}
+                                />
+                                <Text
+                                    style={[
+                                        styles2.feedChipText,
+                                        { color: active ? "#fff" : palette.textSecondary },
+                                    ]}
+                                >
+                                    {feed.label}
+                                </Text>
+                            </Pressable>
+                        );
+                    })}
+                </ScrollView>
+
                 {/* Category chips */}
                 <ScrollView
                     horizontal
@@ -378,12 +775,15 @@ export default function EventsScreen({ navigation }) {
 
                 {/* Content */}
                 {loading && !refreshing ? (
-                    <View style={styles2.centerContainer}>
-                        <ActivityIndicator size="large" color={palette.oceanBlue} />
-                        <Text style={[styles2.loadingText, { color: palette.textMuted }]}>
-                            Finding events near you…
-                        </Text>
-                    </View>
+                    <FlatList
+                        data={[0, 1, 2, 3]}
+                        keyExtractor={(item) => `sk-${item}`}
+                        renderItem={() => (
+                            <EventSkeletonCard palette={palette} isDark={isDark} />
+                        )}
+                        contentContainerStyle={styles2.list}
+                        showsVerticalScrollIndicator={false}
+                    />
                 ) : error ? (
                     <View style={styles2.centerContainer}>
                         <Ionicons name="cloud-offline-outline" size={48} color={palette.textMuted} />
@@ -456,34 +856,54 @@ export default function EventsScreen({ navigation }) {
 
 const styles = StyleSheet.create({
     card: {
-        borderRadius: 16,
+        borderRadius: 18,
         borderWidth: 1,
         overflow: "hidden",
-        marginBottom: 14,
+        marginBottom: 16,
+        // Subtle shadow for depth
+        shadowColor: "#000",
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.10,
+        shadowRadius: 8,
+        elevation: 3,
     },
     cardImage: {
         width: "100%",
-        height: 170,
-        backgroundColor: "rgba(0,0,0,0.15)",
+        height: 195,
+        backgroundColor: "rgba(0,0,0,0.12)",
     },
     cardImageIconWrap: {
         flex: 1,
         alignItems: "center",
         justifyContent: "center",
     },
-    categoryBadge: {
+    cardImageScrim: {
         position: "absolute",
-        top: 12,
+        bottom: 0,
+        left: 0,
+        right: 0,
+        height: 56,
+    },
+    // Category badge is now inside image at bottom-left
+    categoryBadgeOverlay: {
+        position: "absolute",
+        bottom: 10,
         left: 12,
-        paddingHorizontal: 10,
-        paddingVertical: 4,
+        flexDirection: "row",
+        alignItems: "center",
+    },
+    categoryBadge: {
+        flexDirection: "row",
+        alignItems: "center",
+        paddingHorizontal: 9,
+        paddingVertical: 3,
         borderRadius: 20,
     },
     categoryBadgeText: {
         color: "#fff",
-        fontSize: 10,
-        fontWeight: "700",
-        letterSpacing: 0.5,
+        fontSize: 9,
+        fontWeight: "800",
+        letterSpacing: 0.6,
     },
     cardBody: {
         padding: 14,
@@ -491,7 +911,7 @@ const styles = StyleSheet.create({
     cardTitle: {
         fontSize: 15,
         fontWeight: "700",
-        lineHeight: 20,
+        lineHeight: 21,
         marginBottom: 8,
     },
     cardMeta: {
@@ -501,6 +921,70 @@ const styles = StyleSheet.create({
     cardMetaText: {
         fontSize: 12,
         flex: 1,
+        lineHeight: 17,
+    },
+    priceBadge: {
+        position: "absolute",
+        top: 12,
+        right: 12,
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 20,
+        maxWidth: 145,
+    },
+    priceBadgeText: {
+        fontSize: 11,
+        fontWeight: "700",
+    },
+    reasonRow: {
+        flexDirection: "row",
+        alignItems: "flex-start",
+        marginTop: 10,
+        paddingHorizontal: 9,
+        paddingVertical: 7,
+        borderRadius: 10,
+    },
+    reasonText: {
+        fontSize: 11,
+        fontWeight: "600",
+        flex: 1,
+        lineHeight: 15,
+    },
+    cardFooter: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        marginTop: 11,
+    },
+    sourceBadge: {
+        flexDirection: "row",
+        alignItems: "center",
+        paddingHorizontal: 8,
+        paddingVertical: 3,
+        borderRadius: 20,
+        gap: 4,
+    },
+    sourceDot: {
+        width: 6,
+        height: 6,
+        borderRadius: 3,
+    },
+    sourceBadgeText: {
+        fontSize: 10,
+        fontWeight: "700",
+    },
+    bookBtn: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 4,
+        paddingHorizontal: 11,
+        paddingVertical: 5,
+        borderRadius: 14,
+        borderWidth: 1.2,
+    },
+    bookBtnText: {
+        fontSize: 11,
+        fontWeight: "700",
     },
 });
 
@@ -533,6 +1017,10 @@ function createStyles(palette, isDark) {
             fontSize: 13,
             marginTop: 2,
         },
+        feedScroll: {
+            maxHeight: 48,
+            marginBottom: 4,
+        },
         chipsScroll: {
             maxHeight: 46,
             marginBottom: 8,
@@ -554,6 +1042,19 @@ function createStyles(palette, isDark) {
         chipText: {
             fontSize: 12,
             fontWeight: "600",
+        },
+        feedChip: {
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 6,
+            paddingHorizontal: 14,
+            paddingVertical: 8,
+            borderRadius: 22,
+            borderWidth: 1,
+        },
+        feedChipText: {
+            fontSize: 13,
+            fontWeight: "700",
         },
         list: {
             paddingHorizontal: 16,

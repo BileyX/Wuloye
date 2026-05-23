@@ -43,6 +43,7 @@ from learning.realtime import (
     get_top_categories,
     generate_explanation as pref_generate_explanation,
 )
+from denomination.classifier import classify as denom_classify
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -116,6 +117,8 @@ class CandidateIn(BaseModel):
     reviews:           Optional[list[Any]] = Field(default_factory=list)
     image:             Optional[str] = ""
 
+    model_config = {"extra": "ignore"}
+
 
 class ContextIn(BaseModel):
     time_of_day:        Optional[str]              = "morning"
@@ -143,6 +146,10 @@ class ContextIn(BaseModel):
     discover_category:  Optional[str]              = None
     # Display
     explain:            Optional[bool]             = False  # set true to fill `reason`
+
+    # Be permissive about unknown keys from future backend versions so a new
+    # field never throws 422 and breaks the whole recommendation pipeline.
+    model_config = {"extra": "ignore"}
 
 
 class PredictRequest(BaseModel):
@@ -173,6 +180,9 @@ class RankedPlace(BaseModel):
     budget_fit:      bool = True
     religion_match:  bool = True
     lifestyle_match: bool = False
+    # Denomination classification (for religious venues)
+    denomination_type:       Optional[str]   = None  # "orthodox"|"protestant"|"catholic"|"muslim"|"christian"
+    denomination_confidence: Optional[float] = None  # 0.0–1.0
 
 
 class PredictResponse(BaseModel):
@@ -216,36 +226,30 @@ def _budget_fit_score(user_tier: str, place_tier: str) -> tuple[float, bool]:
 
 
 def _get_place_religion(place_text: str, ptype: str) -> str:
-    """Classify a place's religion from its text + type."""
-    if any(k in place_text for k in ("mosque", "masjid", "mesjid", "jami", "jamia", "muslim", "islamic", "salah", "musalla")):
-        return "muslim"
-    if any(k in place_text for k in ("orthodox", "debre", "kidus", "kidist", "kiddis", "bete christian", "giorgis", "medhanealem")):
-        return "orthodox"
-    if any(k in place_text for k in ("protestant", "evangelical", "mekane yesus", "kale hiwot", "seventh", "adventist", "pentecost", "full gospel", "baptist", "lutheran")):
-        return "protestant"
-    if any(k in place_text for k in ("catholic", "roman church", "franciscan", "jesuit")):
-        return "catholic"
-    if any(k in place_text for k in ("church", "chapel", "worship", "prayer hall", "christian")):
-        return "christian"
-    return ""
+    """
+    Classify a place's religion from its text + type.
+    Delegates to the denomination classifier for full accuracy.
+    """
+    result = denom_classify({"name": place_text, "type": ptype, "description": ""})
+    return result.denomination if result.is_religious else ""
 
 
 def _religion_allowed(user_religion: str, place_religion: str) -> bool:
     """Returns True if the place's religion is compatible with the user's."""
-    if not place_religion:
+    if not place_religion or place_religion == "other":
         return True  # non-religious place → always allowed
     r = user_religion.lower()
     if r in ("", "other", "prefer_not_to_say"):
         return True
     if r == "orthodox":
-        return place_religion in ("orthodox", "christian")
+        return place_religion == "orthodox"
     if r == "protestant":
-        return place_religion in ("protestant", "christian")
+        return place_religion == "protestant"
     if r == "catholic":
-        return place_religion in ("catholic", "christian")
+        return place_religion == "catholic"
     if r == "muslim":
         return place_religion == "muslim"
-    return True  # unknown religion → no filter
+    return True
 
 
 def _lifestyle_score(place_type: str, weekly_activities: list[str], interests: list[str]) -> float:
@@ -493,25 +497,36 @@ def _score_candidate(
         else:
             in_budget_final = True
 
-        # ── 7. Religion matching — hard contradiction filter ────────────────
+        # ── 7. Religion matching — denomination-aware contradiction filter ─────
         religion = (context.religion or "").lower()
         religion_match_flag = True
-        is_religious_venue = ptype in (
-            "church", "mosque", "worship", "prayer", "chapel",
-            "temple", "masjid", "mesjid", "cathedral", "jami"
-        )
+        denom_type: Optional[str] = None
+        denom_confidence: float = 0.0
 
-        if is_religious_venue and religion and religion not in ("", "prefer_not_to_say", "other"):
-            place_text = f"{ptype} {(candidate.place_name or '').lower()} {(candidate.place_description or '').lower()}"
-            place_religion = _get_place_religion(place_text, ptype)
-            religion_allowed = _religion_allowed(religion, place_religion)
+        place_for_denom = {
+            "id":          candidate.place_id,
+            "name":        candidate.place_name or "",
+            "type":        ptype,
+            "description": candidate.place_description or "",
+            "tags":        candidate.tags or [],
+        }
+        denom_result = denom_classify(place_for_denom)
+        denom_type        = denom_result.denomination
+        denom_confidence  = denom_result.confidence
+
+        if denom_result.is_religious and religion and religion not in ("", "prefer_not_to_say", "other"):
+            religion_allowed = _religion_allowed(religion, denom_type)
 
             if religion_allowed:
-                ai = min(1.0, ai + 0.08)   # matching denomination → strong boost
+                # Matching denomination → boost proportional to classifier confidence
+                boost = 0.06 + 0.06 * denom_confidence
+                ai = min(1.0, ai + boost)
                 religion_match_flag = True
             else:
-                # CONTRADICTION: orthodox user seeing mosque, etc. → hard kill
-                ai = max(0.0, ai - 0.45)
+                # CONTRADICTION: wrong denomination → hard penalty
+                # Scaled by confidence so a weak "catholic?" label doesn't crush ambiguous places
+                penalty = 0.30 + 0.20 * denom_confidence
+                ai = max(0.0, ai - penalty)
                 religion_match_flag = False
 
         # ── 8. Lifestyle / activity alignment ──────────────────────────────
@@ -613,6 +628,8 @@ def _score_candidate(
             budget_fit       = in_budget_final,
             religion_match   = religion_match_flag,
             lifestyle_match  = lifestyle_match_flag,
+            denomination_type        = denom_type if denom_result.is_religious else None,
+            denomination_confidence  = round(denom_confidence, 3) if denom_result.is_religious else None,
         )
 
     except Exception as exc:

@@ -11,11 +11,11 @@ import os
 import re
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from store.firebase_client import get_firestore
 
-from .base_scraper import clean_text
+from .base_scraper import clean_text, is_past_event
 from .image_helpers import fetch_og_image, is_usable_event_image
 from .registry import iter_scraper_factories_ordered
 
@@ -58,6 +58,18 @@ def _make_hash(title: str, date: str, location: str) -> str:
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _event_identity_hash(event: dict) -> str:
+    """Stable hash for dedup — Chapa ref_id gets its own key to avoid Telegram collisions."""
+    ref = clean_text(event.get("chapa_ref_id") or "")
+    if ref:
+        return hashlib.md5(f"chapa:{ref}".encode("utf-8")).hexdigest()
+    return _make_hash(
+        event.get("title", ""),
+        event.get("date", ""),
+        event.get("location", ""),
+    )
+
+
 def _legacy_make_hash(title: str, date: str, location: str) -> str:
     """Previous Firestore hash — matches older rows so we avoid duplicate inserts."""
     raw = f"{title.lower().strip()}|{date[:10]}|{location.lower().strip()}"
@@ -66,10 +78,16 @@ def _legacy_make_hash(title: str, date: str, location: str) -> str:
 
 def _source_priority(source: str) -> int:
     s = (source or "").lower()
+    if "chapa_events" in s:
+        return 105
     if "eventbrite" in s:
         return 100
+    if "eth_local" in s:
+        return 95
     if s.startswith("meetup"):
         return 92
+    if "eth_rss" in s:
+        return 90
     if "alladdis" in s:
         return 88
     if "whatsup" in s:
@@ -80,6 +98,8 @@ def _source_priority(source: str) -> int:
         return 75
     if "facebook_public" in s:
         return 72
+    if "instagram_public" in s:
+        return 70
     if s.startswith("telegram_"):
         return 55
     return 45
@@ -161,22 +181,96 @@ def _enrich_missing_images(events: list[dict], headers: dict) -> None:
         time.sleep(delay_s)
 
 
-def _get_existing_hashes(db) -> set[str]:
+def _get_existing_index(db) -> dict[str, dict]:
+    """
+    Map event hash → { doc_id, source, hash, legacy_hash } for upsert decisions.
+    """
     try:
-        snap = db.collection(EVENTS_COLLECTION).select(["hash", "legacy_hash"]).get()
-        hashes: set[str] = set()
+        snap = db.collection(EVENTS_COLLECTION).select(["hash", "legacy_hash", "source"]).get()
+        index: dict[str, dict] = {}
         for doc in snap:
             d = doc.to_dict()
-            h = d.get("hash", "")
-            if h:
-                hashes.add(h)
-            lh = d.get("legacy_hash", "")
-            if lh:
-                hashes.add(lh)
-        return hashes
+            entry = {
+                "doc_id": doc.id,
+                "source": str(d.get("source") or ""),
+                "hash": d.get("hash") or "",
+                "legacy_hash": d.get("legacy_hash") or "",
+            }
+            for key in (entry["hash"], entry["legacy_hash"]):
+                if key and key not in index:
+                    index[key] = entry
+        return index
     except Exception as exc:
-        logger.warning("[manager] Could not load existing hashes: %s", exc)
-        return set()
+        logger.warning("[manager] Could not load existing index: %s", exc)
+        return {}
+
+
+def _get_existing_hashes(db) -> set[str]:
+    """Backward-compatible hash set derived from the index."""
+    index = _get_existing_index(db)
+    out: set[str] = set()
+    for entry in index.values():
+        if entry.get("hash"):
+            out.add(entry["hash"])
+        if entry.get("legacy_hash"):
+            out.add(entry["legacy_hash"])
+    return out
+
+
+def _cleanup_expired_events(db) -> int:
+    """
+    Delete Firestore events that are clearly expired.
+
+    An event is expired when BOTH of the following are true:
+      - Its `date` is more than 2 days in the past (if the date exists and is parseable), OR
+        its `created_at` is older than 21 days (stale, no valid date).
+      - It is NOT featured.
+
+    Returns the number of documents deleted.
+    """
+    try:
+        snap = db.collection(EVENTS_COLLECTION).select(["date", "created_at", "featured"]).get()
+    except Exception as exc:
+        logger.warning("[manager] cleanup: could not fetch documents: %s", exc)
+        return 0
+
+    now = datetime.now(timezone.utc)
+    cutoff_created_at = (now - timedelta(days=21)).isoformat()
+    to_delete: list[str] = []
+
+    for doc in snap:
+        d = doc.to_dict()
+        if d.get("featured"):
+            continue
+        date_str = d.get("date") or ""
+        created_at_str = d.get("created_at") or d.get("scraped_at") or ""
+
+        expired_by_date = bool(date_str) and is_past_event(date_str, grace_days=2)
+        stale_no_date   = (not date_str) and bool(created_at_str) and created_at_str < cutoff_created_at
+        stale_with_date = bool(date_str) and bool(created_at_str) and created_at_str < cutoff_created_at
+
+        if expired_by_date or stale_no_date or stale_with_date:
+            to_delete.append(doc.id)
+
+    if not to_delete:
+        logger.info("[manager] cleanup: nothing to delete")
+        return 0
+
+    # Batch delete (max 500 per Firestore batch)
+    deleted = 0
+    for i in range(0, len(to_delete), 450):
+        batch = db.batch()
+        chunk = to_delete[i : i + 450]
+        for doc_id in chunk:
+            batch.delete(db.collection(EVENTS_COLLECTION).document(doc_id))
+        try:
+            batch.commit()
+            deleted += len(chunk)
+        except Exception as exc:
+            logger.warning("[manager] cleanup batch failed: %s", exc)
+
+    logger.info("[manager] cleanup: deleted %d expired event(s)", deleted)
+    return deleted
 
 
 def run_all_scrapers() -> dict:
@@ -226,27 +320,65 @@ def run_all_scrapers() -> dict:
     _enrich_missing_images(merged, headers)
 
     db = get_firestore()
-    existing_hashes = _get_existing_hashes(db)
+
+    # Purge expired events before inserting new ones — keeps the collection lean.
+    cleanup_count = _cleanup_expired_events(db)
+
+    existing_index = _get_existing_index(db)
+    existing_hashes: set[str] = set()
+    for entry in existing_index.values():
+        if entry.get("hash"):
+            existing_hashes.add(entry["hash"])
+        if entry.get("legacy_hash"):
+            existing_hashes.add(entry["legacy_hash"])
 
     inserted = 0
+    upgraded = 0
     skipped = 0
     sources: dict[str, int] = {}
     now = datetime.now(timezone.utc).isoformat()
 
     for event in merged:
-        event_hash = _make_hash(
-            event.get("title", ""),
-            event.get("date", ""),
-            event.get("location", ""),
-        )
+        event_hash = _event_identity_hash(event)
         legacy_hash = _legacy_make_hash(
             event.get("title", ""),
             event.get("date", ""),
             event.get("location", ""),
         )
 
-        if event_hash in existing_hashes or legacy_hash in existing_hashes:
-            skipped += 1
+        existing = existing_index.get(event_hash) or existing_index.get(legacy_hash)
+        if existing:
+            new_prio = _source_priority(str(event.get("source", "")))
+            old_prio = _source_priority(existing.get("source", ""))
+            if new_prio > old_prio:
+                reg = extract_registration_urls(
+                    event.get("description", ""), event.get("source_url", "")
+                )
+                patch = {
+                    **event,
+                    "hash": event_hash,
+                    "legacy_hash": legacy_hash,
+                    "scraped_at": now,
+                    "updated_at": now,
+                }
+                if reg:
+                    patch["registration_urls"] = reg
+                try:
+                    db.collection(EVENTS_COLLECTION).document(existing["doc_id"]).update(patch)
+                    upgraded += 1
+                    src = event.get("source", "unknown")
+                    sources[src] = sources.get(src, 0) + 1
+                    logger.info(
+                        "[manager] Upgraded event '%s' → source=%s (prio %d > %d)",
+                        event.get("title", "")[:50],
+                        src,
+                        new_prio,
+                        old_prio,
+                    )
+                except Exception as exc:
+                    logger.warning("[manager] Upgrade failed '%s': %s", event.get("title"), exc)
+            else:
+                skipped += 1
             continue
 
         reg = extract_registration_urls(event.get("description", ""), event.get("source_url", ""))
@@ -264,19 +396,30 @@ def run_all_scrapers() -> dict:
             db.collection(EVENTS_COLLECTION).add(doc)
             existing_hashes.add(event_hash)
             existing_hashes.add(legacy_hash)
+            existing_index[event_hash] = {
+                "doc_id": "(new)",
+                "source": event.get("source", ""),
+                "hash": event_hash,
+                "legacy_hash": legacy_hash,
+            }
             inserted += 1
             src = event.get("source", "unknown")
             sources[src] = sources.get(src, 0) + 1
         except Exception as exc:
             logger.warning("[manager] Failed to insert '%s': %s", event.get("title"), exc)
 
-    logger.info("[manager] Done — inserted=%d skipped=%d merged_in=%d", inserted, skipped, len(merged))
+    logger.info(
+        "[manager] Done — inserted=%d upgraded=%d skipped=%d merged_in=%d cleaned_up=%d",
+        inserted, upgraded, skipped, len(merged), cleanup_count,
+    )
 
     return {
         "total_scraped": len(all_events),
         "merged_unique": len(merged),
         "inserted": inserted,
+        "upgraded": upgraded,
         "skipped_duplicates": skipped,
+        "cleaned_up": cleanup_count,
         "sources": sources,
         "ran_at": now,
         "errors": source_errors,

@@ -20,10 +20,6 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAppTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
-import {
-    getRecommendations,
-    parseRecommendationsResponse,
-} from "../api/recommendationApi";
 import { createInteraction, createInteractionsBatch } from "../api/interactionApi";
 import { INTERACTION_TYPES } from "../utils/constants";
 import { normalisePlace } from "../utils/recommendationPlaces";
@@ -32,9 +28,19 @@ import {
     filterReligiousPlacesByUserReligion,
 } from "../utils/discoverCategory";
 import { getApiErrorMessage } from "../utils/api";
-import Loader from "../components/Loader";
+import PlaceListSkeleton from "../components/PlaceListSkeleton";
 import DiscoverCard from "../components/DiscoverCard";
 import useLocation from "../hooks/useLocation";
+import { useRecommendationsFeed } from "../hooks/useRecommendationsFeed";
+import {
+    buildFeedCacheKey,
+    getFeedCache,
+    setFeedCache,
+} from "../utils/feedCache";
+import {
+    getRecommendations,
+    parseRecommendationsResponse,
+} from "../api/recommendationApi";
 import { prefetchPlaceDetails } from "../api/placeApi";
 import { prefetchEventById } from "../api/eventsApi";
 
@@ -413,20 +419,25 @@ export default function DiscoverScreen({ navigation, route }) {
     const isNearbyMode = routeMode === "nearby";
 
     const [selectedFilter, setSelectedFilter] = useState("all");
-    const [places, setPlaces] = useState([]);
     const [likedPlaceIds, setLikedPlaceIds] = useState(() => new Set());
     const [savedPlaceIds, setSavedPlaceIds] = useState(() => new Set());
-    const [aiMeta, setAiMeta] = useState(null);
-    const [loading, setLoading] = useState(true);
-    const [refreshing, setRefreshing] = useState(false);
-    const [error, setError] = useState("");
 
     const refreshTimerRef = useRef(null);
     const headerAnim = useRef(new Animated.Value(0)).current;
     const { location: geoLocation, requestCurrentLocation } = useLocation();
+    const [geoPrimed, setGeoPrimed] = useState(false);
+
+    const userReligion = profile?.religion ?? null;
 
     useEffect(() => {
-        requestCurrentLocation();
+        let cancelled = false;
+        (async () => {
+            await requestCurrentLocation();
+            if (!cancelled) setGeoPrimed(true);
+        })();
+        return () => {
+            cancelled = true;
+        };
     }, [requestCurrentLocation]);
 
     // Header entrance animation
@@ -446,6 +457,7 @@ export default function DiscoverScreen({ navigation, route }) {
             if (filter) {
                 params.category = filter;
                 params.type = filter;
+                params.fast = "true";
             }
             const lat = geoLocation?.coords?.latitude;
             const lng = geoLocation?.coords?.longitude;
@@ -459,109 +471,123 @@ export default function DiscoverScreen({ navigation, route }) {
         [isNearbyMode, geoLocation],
     );
 
-    const fetchPlaces = useCallback(
-        async (filter) => {
-            try {
-                setLoading(true);
-                setError("");
-
-                const params = buildParams(filter);
-                const envelope = await getRecommendations(params);
-                const { recommendations, meta } =
-                    parseRecommendationsResponse(envelope);
-
-                const mapped = Array.isArray(recommendations)
-                    ? recommendations.map((item, idx) =>
-                          normalisePlace(item, idx, meta),
-                      )
-                    : [];
-
-                const apiFilterKey = discoverApiFilter(filter);
-                const categoryFiltered =
-                    filterDiscoverItemsByCategory(mapped, apiFilterKey);
-
-                // Defense-in-depth: apply religion sub-filter on client for cached /
-                // stale results when the user has tapped the "church" chip.
-                const userReligion = profile?.religion ?? null;
-                const clientFiltered =
-                    apiFilterKey === "church" && userReligion
-                        ? filterReligiousPlacesByUserReligion(categoryFiltered, userReligion)
-                        : categoryFiltered;
-
-                if (__DEV__) {
-                    // eslint-disable-next-line no-console
-                    console.log("Discover selected:", filter, "API category:", apiFilterKey,
-                        "religion:", userReligion);
-                    // eslint-disable-next-line no-console
-                    console.log(
-                        "Discover client-filtered:",
-                        clientFiltered.length,
-                        clientFiltered.map((p) => p.category),
-                    );
-                }
-
-                setPlaces(clientFiltered);
-                setAiMeta(meta?.ai ?? null);
-
-                // Log impressions for AI feedback
-                if (clientFiltered.length > 0) {
-                    const impressions = clientFiltered.slice(0, 6).map((p) => ({
-                        placeId: p.placeId,
-                        actionType: INTERACTION_TYPES.VIEW,
-                        metadata: {
-                            source: isNearbyMode ? "nearby_feed" : "discover_feed",
-                            filter,
-                            place: p,
-                        },
-                    }));
-                    createInteractionsBatch(impressions).catch(() => null);
-                }
-            } catch (err) {
-                setError(getApiErrorMessage(err, "Unable to load recommendations."));
-            } finally {
-                setLoading(false);
+    const transformResults = useCallback(
+        (recommendations, meta, filter) => {
+            const mapped = recommendations.map((item, idx) =>
+                normalisePlace(item, idx, meta),
+            );
+            const apiFilterKey = discoverApiFilter(filter);
+            const categoryFiltered = filterDiscoverItemsByCategory(
+                mapped,
+                apiFilterKey,
+            );
+            if (apiFilterKey === "church" && userReligion) {
+                return filterReligiousPlacesByUserReligion(
+                    categoryFiltered,
+                    userReligion,
+                );
             }
+            return categoryFiltered;
         },
-        [buildParams, isNearbyMode, profile],
+        [userReligion],
     );
 
+    const {
+        places,
+        aiMeta,
+        loading,
+        refreshing,
+        setRefreshing,
+        error,
+        refresh,
+    } = useRecommendationsFeed({
+        buildParams,
+        transformResults,
+        scope: isNearbyMode ? "nearby" : "discover",
+        filter: selectedFilter,
+        geoLocation,
+        geoPrimed,
+        religion: userReligion,
+        enabled: geoPrimed,
+    });
+
+    const lastImpressionRef = useRef("");
     useEffect(() => {
-        fetchPlaces(selectedFilter);
-    }, [fetchPlaces, selectedFilter]);
+        if (!places.length) return;
+        const sig = `${selectedFilter}:${places.map((p) => p.placeId).join(",")}`;
+        if (lastImpressionRef.current === sig) return;
+        lastImpressionRef.current = sig;
+        const impressions = places.slice(0, 6).map((p) => ({
+            placeId: p.placeId,
+            actionType: INTERACTION_TYPES.VIEW,
+            metadata: {
+                source: isNearbyMode ? "nearby_feed" : "discover_feed",
+                filter: selectedFilter,
+                place: p,
+            },
+        }));
+        createInteractionsBatch(impressions).catch(() => null);
+    }, [places, selectedFilter, isNearbyMode]);
 
     useEffect(() => () => clearTimeout(refreshTimerRef.current), []);
 
     const scheduleRefresh = useCallback(() => {
         clearTimeout(refreshTimerRef.current);
-        refreshTimerRef.current = setTimeout(async () => {
-            try {
-                const envelope = await getRecommendations(
-                    buildParams(selectedFilter),
-                );
-                const { recommendations, meta } =
-                    parseRecommendationsResponse(envelope);
-                const mapped = Array.isArray(recommendations)
-                    ? recommendations.map((item, idx) =>
-                          normalisePlace(item, idx, meta),
-                      )
-                    : [];
-                const apiFilterKey = discoverApiFilter(selectedFilter);
-                setPlaces(filterDiscoverItemsByCategory(mapped, apiFilterKey));
-                setAiMeta(meta?.ai ?? null);
-            } catch {
-                // silent — keep existing list
-            }
+        refreshTimerRef.current = setTimeout(() => {
+            refresh().catch(() => null);
         }, 1500);
-    }, [selectedFilter, buildParams]);
+    }, [refresh]);
 
     async function handleRefresh() {
         setRefreshing(true);
         try {
-            await fetchPlaces(selectedFilter);
+            await refresh();
         } finally {
             setRefreshing(false);
         }
     }
+
+    const showSkeleton = loading && !refreshing && places.length === 0;
+    const showList = !showSkeleton;
+
+    // Warm common Discover chips in the background after the first load.
+    useEffect(() => {
+        if (!geoPrimed) return;
+        const warmKeys = ["church", "cafe", "gym", "hotel"];
+        const timer = setTimeout(() => {
+            warmKeys.forEach((chip) => {
+                if (chip === selectedFilter) return;
+                const key = buildFeedCacheKey({
+                    scope: isNearbyMode ? "nearby" : "discover",
+                    filter: chip,
+                    lat: geoLocation?.coords?.latitude ?? null,
+                    lng: geoLocation?.coords?.longitude ?? null,
+                    religion: userReligion,
+                });
+                if (getFeedCache(key)?.places?.length) return;
+                getRecommendations(buildParams(chip))
+                    .then((envelope) => {
+                        const { recommendations, meta } =
+                            parseRecommendationsResponse(envelope);
+                        const raw = Array.isArray(recommendations)
+                            ? recommendations
+                            : [];
+                        const processed = transformResults(raw, meta, chip);
+                        setFeedCache(key, processed, meta?.ai ?? null);
+                    })
+                    .catch(() => null);
+            });
+        }, 1200);
+        return () => clearTimeout(timer);
+    }, [
+        geoPrimed,
+        geoLocation,
+        isNearbyMode,
+        userReligion,
+        buildParams,
+        transformResults,
+        selectedFilter,
+    ]);
 
     function handleFilterPress(key) {
         if (key === "all") {
@@ -796,17 +822,22 @@ export default function DiscoverScreen({ navigation, route }) {
                 ) : null}
 
                 {/* ── Content ── */}
-                {loading && !refreshing ? (
+                {showSkeleton ? (
                     <View style={styles.loaderWrap}>
-                        <Loader />
+                        <PlaceListSkeleton variant="discover" count={4} />
                     </View>
-                ) : (
+                ) : null}
+                {showList ? (
                     <FlatList
                         data={places}
-                        keyExtractor={(item) => item.id}
+                        keyExtractor={(item) => String(item.id ?? item.placeId)}
                         showsVerticalScrollIndicator={false}
                         refreshing={refreshing}
                         onRefresh={handleRefresh}
+                        initialNumToRender={4}
+                        maxToRenderPerBatch={6}
+                        windowSize={7}
+                        removeClippedSubviews
                         contentContainerStyle={styles.listContent}
                         ListHeaderComponent={() => (
                             <View>
@@ -860,7 +891,7 @@ export default function DiscoverScreen({ navigation, route }) {
                             </View>
                         )}
                         ListEmptyComponent={
-                            !loading ? (
+                            !loading && geoPrimed ? (
                                 <View style={styles.emptyWrap}>
                                     <Ionicons
                                         name="search-outline"
@@ -892,7 +923,7 @@ export default function DiscoverScreen({ navigation, route }) {
                             />
                         )}
                     />
-                )}
+                ) : null}
             </LinearGradient>
         </SafeAreaView>
     );
