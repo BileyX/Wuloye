@@ -136,7 +136,9 @@ class EventbriteScraper(BaseScraper):
         elif isinstance(img, str):
             image = img
         image = sanitize_image_url(image, url)
-        loc_obj = ld.get("location", {})
+
+        location = "Addis Ababa"
+        loc_obj = ld.get("location", {}) or {}
         if isinstance(loc_obj, dict):
             venue_name = loc_obj.get("name", "")
             addr = loc_obj.get("address", {})
@@ -151,9 +153,42 @@ class EventbriteScraper(BaseScraper):
             except (KeyError, ValueError, TypeError):
                 pass
 
+        organizer = ""
+        org_obj = ld.get("organizer") or {}
+        if isinstance(org_obj, dict):
+            organizer = clean_text(org_obj.get("name") or "")
+        elif isinstance(org_obj, list) and org_obj:
+            first = org_obj[0]
+            if isinstance(first, dict):
+                organizer = clean_text(first.get("name") or "")
+
+        # JSON-LD Offer (https://schema.org/Offer)
+        offers = ld.get("offers") or []
+        if isinstance(offers, dict):
+            offers = [offers]
+        ticket_price = ""
+        is_paid = False
+        if isinstance(offers, list):
+            for off in offers:
+                if not isinstance(off, dict):
+                    continue
+                price = off.get("price")
+                currency = (off.get("priceCurrency") or "").upper()
+                if price not in (None, "", 0, "0", "0.0", "0.00"):
+                    try:
+                        pnum = float(price)
+                        if pnum > 0:
+                            is_paid = True
+                            ticket_price = f"{currency or 'ETB'} {pnum:.0f}".strip()
+                            break
+                    except (TypeError, ValueError):
+                        is_paid = True
+                        ticket_price = str(price)
+                        break
+
         category = normalise_category(f"{title} {description}")
 
-        return {
+        out = {
             "title": title,
             "description": description[:500],
             "location": location,
@@ -164,6 +199,13 @@ class EventbriteScraper(BaseScraper):
             "source_url": url,
             "source": self.SOURCE_NAME,
         }
+        if organizer:
+            out["organizer"] = organizer
+        if ticket_price:
+            out["ticket_price"] = ticket_price
+        if is_paid:
+            out["is_paid"] = True
+        return out
 
     def _parse_html_meta(self, soup: BeautifulSoup, url: str) -> dict | None:
         def meta(name: str) -> str:

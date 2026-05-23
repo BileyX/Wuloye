@@ -19,19 +19,28 @@ from .meetup_scraper import MeetupEthiopiaScraper
 from .rss_feed_scraper import RssFeedScraper
 from .culture_venue_scraper import CultureVenueScraper
 from .facebook_public_scraper import FacebookPublicLinkScraper
+from .instagram_public_scraper import InstagramPublicLinkScraper
+from .eth_local_scraper import EthLocalEventsScraper
+from .eth_rss_scraper import EthRssScraper
+from .chapa_scraper import ChapaEventsScraper
 
 ScraperFactory = Callable[[], object]
 
 # (priority, factory) — factory returns a scraper instance with .run()
+# Higher priority = more authoritative source (wins on duplicate merge).
 SCRAPER_FACTORIES: list[tuple[int, ScraperFactory]] = [
-    (100, lambda: EventbriteScraper()),
-    (92, lambda: MeetupEthiopiaScraper()),
-    (88, lambda: AllAddisScraper()),
-    (88, lambda: WhatsUpAddisScraper()),
-    (82, lambda: CultureVenueScraper()),
-    (75, lambda: RssFeedScraper()),
-    (70, lambda: FacebookPublicLinkScraper()),
-    # Broad Telegram harvest — lower priority than curated web listings
+    (105, lambda: ChapaEventsScraper()),        # Chapa Events — Ethiopian ticketing platform (highest trust)
+    (100, lambda: EventbriteScraper()),         # Eventbrite — structured global event platform
+    (95, lambda: EthLocalEventsScraper()),      # Ethiopian institution websites
+    (92, lambda: MeetupEthiopiaScraper()),      # Meetup.com Ethiopia groups
+    (90, lambda: EthRssScraper()),              # Ethiopian news & event RSS feeds
+    (88, lambda: AllAddisScraper()),            # AllAddisEvents
+    (88, lambda: WhatsUpAddisScraper()),        # WhatsUpAddis
+    (82, lambda: CultureVenueScraper()),        # British Council, ICC Addis, etc.
+    (75, lambda: RssFeedScraper()),             # Custom env-configured RSS feeds
+    (70, lambda: FacebookPublicLinkScraper()),  # Facebook public event pages
+    (68, lambda: InstagramPublicLinkScraper()),
+    # Broad Telegram harvest — lowest priority, highest volume
     (55, lambda: TelegramScraper()),
 ]
 

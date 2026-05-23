@@ -5,6 +5,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useAppTheme } from "../context/ThemeContext";
 import AuthenticatedPlacePhoto from "./AuthenticatedPlacePhoto";
 import { effectivePricingEnabled } from "../utils/pricingDisplay";
+import { getPlaceVisualMeta } from "../utils/placeVisuals";
 
 /**
  * Feed card — three quick actions: like · save · pass (social-style).
@@ -82,6 +83,34 @@ export default function PlaceCard({
     const religionMatch  = place?.matches?.religion === true;
     const lifestyleMatch = place?.matches?.lifestyle === true;
 
+    // Denomination badge (only for church-type places)
+    const denomType = place?.denominationType ?? null;
+    const denomLabel = (() => {
+        if (!denomType || place?.type !== "church") return null;
+        switch (denomType) {
+            case "orthodox":   return "Orthodox";
+            case "protestant": return "Protestant";
+            case "catholic":   return "Catholic";
+            case "muslim":     return "Mosque";
+            default:           return null;
+        }
+    })();
+    const denomColor = (() => {
+        switch (denomType) {
+            case "orthodox":   return "#B5651D"; // golden-brown
+            case "protestant": return "#3B6FBF"; // blue
+            case "catholic":   return "#7B2D8B"; // purple
+            case "muslim":     return "#2E8B57";  // green
+            default:           return null;
+        }
+    })();
+
+    const heroImage   = place?.images?.[0] ?? null;
+    const visualMeta  = useMemo(
+        () => getPlaceVisualMeta(place?.type, isDark),
+        [place?.type, isDark],
+    );
+
     return (
         <Animated.View style={[styles.wrapper, animatedStyle]}>
             <Pressable onPress={onPress} onPressIn={onPressIn}>
@@ -91,14 +120,30 @@ export default function PlaceCard({
                     end={{ x: 1, y: 1 }}
                     style={styles.card}
                 >
-                    {place?.images?.[0] ? (
-                        <View style={styles.cardHero}>
+                    <View style={styles.cardHero}>
+                        <LinearGradient
+                            colors={visualMeta.gradient}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={StyleSheet.absoluteFill}
+                        />
+                        {heroImage ? (
                             <AuthenticatedPlacePhoto
-                                relativePath={place.images[0]}
+                                relativePath={heroImage}
                                 style={styles.cardHeroImg}
+                                fallbackIcon={visualMeta.icon}
+                                fallbackTint={visualMeta.accent}
                             />
-                        </View>
-                    ) : null}
+                        ) : (
+                            <View style={styles.heroFallback}>
+                                <Ionicons
+                                    name={visualMeta.icon}
+                                    size={36}
+                                    color={visualMeta.accent}
+                                />
+                            </View>
+                        )}
+                    </View>
                     <View style={styles.cardInner}>
                         {/* ── Badge row: type + pricing + match score ── */}
                         <View style={styles.badgesRow}>
@@ -139,6 +184,17 @@ export default function PlaceCard({
                         </View>
 
                         <Text style={styles.title}>{place?.name ?? "Place name"}</Text>
+
+                        {/* ── Denomination match chip (churches only) ── */}
+                        {denomLabel ? (
+                            <View style={[styles.denomChip, { backgroundColor: `${denomColor}15`, borderColor: `${denomColor}40` }]}>
+                                <Ionicons name="shield-checkmark-outline" size={10} color={denomColor} />
+                                <Text style={[styles.denomChipText, { color: denomColor }]}>
+                                    {religionMatch ? `Matched to your ${denomLabel} preference` : denomLabel}
+                                </Text>
+                            </View>
+                        ) : null}
+
                         <Text style={styles.description} numberOfLines={2}>
                             {place?.description ?? "Premium venue with modern atmosphere and strong community vibe."}
                         </Text>
@@ -268,12 +324,17 @@ function createStyles(palette, isDark) {
         },
         cardHero: {
             width: "100%",
-            height: 148,
+            aspectRatio: 16 / 10,
             backgroundColor: "rgba(20,40,60,0.2)",
+            overflow: "hidden",
         },
         cardHeroImg: {
-            width: "100%",
-            height: "100%",
+            ...StyleSheet.absoluteFillObject,
+        },
+        heroFallback: {
+            ...StyleSheet.absoluteFillObject,
+            alignItems: "center",
+            justifyContent: "center",
         },
         cardInner: {
             padding: 16,
@@ -337,6 +398,22 @@ function createStyles(palette, isDark) {
             color: palette.textSecondary,
             fontSize: 13,
             lineHeight: 19,
+        },
+        denomChip: {
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            borderWidth: 1,
+            borderRadius: 10,
+            paddingHorizontal: 7,
+            paddingVertical: 3,
+            alignSelf: "flex-start",
+            marginBottom: 6,
+        },
+        denomChipText: {
+            fontSize: 10,
+            fontWeight: "700",
+            letterSpacing: 0.2,
         },
         aiInsightRow: {
             flexDirection: "row",

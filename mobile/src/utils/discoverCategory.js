@@ -70,10 +70,11 @@ export function filterDiscoverItemsByCategory(items, selectedFilter) {
  * Mapping: user religion → allowed place religion tags.
  * Mirrors the server's placeAllowedByReligion logic.
  */
+/** Strict: only exact denomination — never generic "christian". */
 const RELIGION_ALLOWED_PLACE_TAGS = Object.freeze({
-    orthodox:   new Set(["orthodox", "christian"]),
-    protestant: new Set(["protestant", "christian"]),
-    catholic:   new Set(["catholic", "christian"]),
+    orthodox:   new Set(["orthodox"]),
+    protestant: new Set(["protestant"]),
+    catholic:   new Set(["catholic"]),
     muslim:     new Set(["muslim"]),
 });
 
@@ -115,11 +116,14 @@ function detectPlaceReligionClient(item) {
     ) return "orthodox";
 
     if (
+        text.includes("eecmy") || text.includes("eec my") ||
         text.includes("protestant") || text.includes("evangelical") ||
         text.includes("mekane yesus") || text.includes("kale hiwot") ||
         text.includes("adventist")   || text.includes("pentecost")   ||
         text.includes("full gospel") || text.includes("baptist")     ||
-        text.includes("lutheran")
+        text.includes("lutheran") ||
+        text.includes("latter-day") || text.includes("latter day") ||
+        text.includes("mormon") || text.includes("jesus christ of")
     ) return "protestant";
 
     if (
@@ -146,11 +150,22 @@ export function filterReligiousPlacesByUserReligion(items, userReligion) {
     if (userReligion === "other" || userReligion === "prefer_not_to_say") return items;
 
     const allowed = RELIGION_ALLOWED_PLACE_TAGS[userReligion.toLowerCase().trim()];
-    if (!allowed) return items; // unknown religion value — do not filter
+    if (!allowed) return items;
 
     return items.filter((item) => {
-        const placeReligion = detectPlaceReligionClient(item);
-        if (!placeReligion) return true; // non-religious → always visible
+        const isChurch =
+            (item?.category ?? item?.type ?? "").toLowerCase() === "church";
+        if (!isChurch) return true;
+
+        const serverDenom = (item?.denominationType ?? "").toLowerCase().trim();
+        const placeReligion =
+            serverDenom && serverDenom !== "other"
+                ? serverDenom
+                : detectPlaceReligionClient(item);
+
+        if (!placeReligion || placeReligion === "christian") {
+            return false;
+        }
         return allowed.has(placeReligion);
     });
 }

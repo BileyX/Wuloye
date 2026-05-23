@@ -4,8 +4,8 @@ import { MapPin, Plus, RefreshCw, X } from "lucide-react";
 import {
   createAdminPlace,
   deleteAdminPlace,
-  listAdminPlaces,
-  patchAdminPlace,
+  getAdminPlaces,
+  updateAdminPlace,
 } from "@/services/endpoints";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,6 @@ function Field({ label, children, className }) {
 
 export default function PlacesAdminPage() {
   const qc = useQueryClient();
-  const [stack, setStack] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({
     name: "", category: "restaurant", priceRange: "medium",
@@ -36,8 +35,8 @@ export default function PlacesAdminPage() {
   });
 
   const placesQuery = useQuery({
-    queryKey: ["admin-places", stack[stack.length - 1] ?? "start"],
-    queryFn: () => listAdminPlaces({ limit: 35, cursor: stack[stack.length - 1] || undefined }),
+    queryKey: ["admin-places"],
+    queryFn: getAdminPlaces,
   });
 
   const createMut = useMutation({
@@ -55,8 +54,8 @@ export default function PlacesAdminPage() {
     },
   });
 
-  const patchMut  = useMutation({
-    mutationFn: ({ id, patch }) => patchAdminPlace(id, patch),
+  const patchMut = useMutation({
+    mutationFn: ({ id, patch }) => updateAdminPlace(id, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-places"] }),
   });
   const deleteMut = useMutation({
@@ -64,8 +63,7 @@ export default function PlacesAdminPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-places"] }),
   });
 
-  const places = placesQuery.data?.places ?? [];
-  const next   = placesQuery.data?.nextCursor;
+  const places = placesQuery.data?.data ?? [];
   const set = (k) => (e) =>
     setForm((f) => ({
       ...f,
@@ -160,14 +158,6 @@ export default function PlacesAdminPage() {
       <Card>
         <CardHeader>
           <CardTitle>Catalogue ({places.length})</CardTitle>
-          <div className="flex gap-2">
-            <Button variant="secondary" size="sm" disabled={stack.length === 0} onClick={() => setStack((s) => s.slice(0, -1))}>
-              ← Prev
-            </Button>
-            <Button variant="secondary" size="sm" disabled={!next} onClick={() => next && setStack((s) => [...s, next])}>
-              Next →
-            </Button>
-          </div>
         </CardHeader>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">

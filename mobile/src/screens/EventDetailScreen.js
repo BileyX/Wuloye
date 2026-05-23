@@ -413,11 +413,35 @@ export default function EventDetailScreen({ route, navigation }) {
 
     const [heroG0, heroG1] = eventPlaceholderGradientColors(event);
 
-    const listingUrl = (event.source_url || "").trim();
+    // Prefer booking_url (direct ticket purchase link) over source_url
+    const bookingUrl = (event.booking_url || "").trim();
+    const listingUrl = bookingUrl || (event.source_url || "").trim();
+
+    const isChapaEvent = String(event?.source || "").includes("chapa");
     const primaryLinkLabel =
-        listingUrl.includes("eventbrite") ? "Tickets & registration"
-            : listingUrl.includes("t.me") || listingUrl.includes("telegram") ? "View original post"
-                : "Full details & registration";
+        bookingUrl && (isChapaEvent || bookingUrl.includes("eventbrite") || bookingUrl.includes("chapa"))
+            ? "Book Tickets on Chapa Events"
+            : listingUrl.includes("eventbrite") ? "Tickets & registration"
+                : listingUrl.includes("t.me") || listingUrl.includes("telegram") ? "View original post"
+                    : "Full details & registration";
+
+    // Source display metadata
+    const SOURCE_META_DETAIL = {
+        chapa_events:   { label: "Chapa Events",  color: "#F59E0B", icon: "ticket-outline" },
+        eventbrite:     { label: "Eventbrite",    color: "#F05537", icon: "ticket-outline" },
+        meetup:         { label: "Meetup",         color: "#ED1C40", icon: "people-outline" },
+        alladdisevents: { label: "AllAddisEvents", color: "#2563EB", icon: "globe-outline" },
+        eth_rss:        { label: "News",           color: "#64748B", icon: "newspaper-outline" },
+        eth_local:      { label: "Local",          color: "#059669", icon: "business-outline" },
+    };
+    const sourceMeta = (() => {
+        const src = String(event?.source || "").toLowerCase();
+        for (const [key, meta] of Object.entries(SOURCE_META_DETAIL)) {
+            if (src.includes(key)) return meta;
+        }
+        if (src.startsWith("telegram_")) return { label: "Telegram", color: "#229ED9", icon: "paper-plane-outline" };
+        return null;
+    })();
 
     return (
         <LinearGradient colors={gradients.appBackground} style={{ flex: 1 }}>
@@ -508,7 +532,76 @@ export default function EventDetailScreen({ route, navigation }) {
                                     </Text>
                                 </View>
                             ) : null}
+                            {event?.ticket_price || event?.is_paid === false ? (
+                                <View style={[styles.chip, { borderColor: palette.borderSoft, backgroundColor: palette.surface }]}>
+                                    <Ionicons name="pricetag-outline" size={14} color={palette.oceanBlue} />
+                                    <Text style={[styles.chipText, { color: palette.textSecondary }]} numberOfLines={1}>
+                                        {event.ticket_price || (event.is_paid === false ? "Free" : "")}
+                                    </Text>
+                                </View>
+                            ) : null}
                         </View>
+
+                        {/* Source badge */}
+                        {sourceMeta && (
+                            <View style={styles.sourceRow}>
+                                <View style={[styles.sourceTag, { backgroundColor: sourceMeta.color + "20" }]}>
+                                    <Ionicons name={sourceMeta.icon} size={13} color={sourceMeta.color} />
+                                    <Text style={[styles.sourceTagText, { color: sourceMeta.color }]}>
+                                        {sourceMeta.label}
+                                    </Text>
+                                </View>
+                            </View>
+                        )}
+
+                        {/* AI reason banner */}
+                        {!!event?.explain && (
+                            <View
+                                style={[
+                                    styles.reasonBanner,
+                                    {
+                                        borderColor: isDark ? "rgba(96,165,250,0.4)" : "rgba(37,99,235,0.35)",
+                                        backgroundColor: isDark ? "rgba(96,165,250,0.12)" : "rgba(37,99,235,0.08)",
+                                    },
+                                ]}
+                            >
+                                <Ionicons
+                                    name="sparkles-outline"
+                                    size={16}
+                                    color={isDark ? "#93C5FD" : "#1D4ED8"}
+                                />
+                                <Text
+                                    style={[
+                                        styles.reasonBannerText,
+                                        { color: isDark ? "#DBEAFE" : "#1E3A8A" },
+                                    ]}
+                                >
+                                    {event.explain}
+                                </Text>
+                            </View>
+                        )}
+
+                        {/* Book Ticket CTA — shown prominently for events with a booking URL */}
+                        {(bookingUrl || listingUrl) ? (
+                            <Pressable
+                                onPress={() => Linking.openURL(bookingUrl || listingUrl).catch(() => {})}
+                                style={({ pressed }) => [
+                                    styles.bookTicketBtn,
+                                    {
+                                        opacity: pressed ? 0.88 : 1,
+                                        backgroundColor: isChapaEvent ? "#F59E0B" : palette.oceanBlue,
+                                    },
+                                ]}
+                                accessibilityRole="button"
+                                accessibilityLabel="Book ticket for this event"
+                            >
+                                <Ionicons name="ticket-outline" size={18} color="#fff" />
+                                <Text style={styles.bookTicketBtnText}>
+                                    {isChapaEvent ? "Book on Chapa Events" : event?.ticket_price ? "Get Tickets" : "View Event"}
+                                </Text>
+                                <Ionicons name="open-outline" size={14} color="rgba(255,255,255,0.8)" />
+                            </Pressable>
+                        ) : null}
 
                         {/* Key facts card */}
                         <View style={[dynStyles.card]}>
@@ -557,7 +650,27 @@ export default function EventDetailScreen({ route, navigation }) {
                             <View style={dynStyles.section}>
                                 <SectionHeader palette={palette}>Links & actions</SectionHeader>
                                 <View style={{ gap: 10 }}>
-                                    {listingUrl ? (
+                                    {/* Show booking URL separately when it differs from listing URL */}
+                                    {bookingUrl && bookingUrl !== (event.source_url || "") ? (
+                                        <ActionRow
+                                            icon="ticket-outline"
+                                            label={isChapaEvent ? "Book on Chapa Events" : "Book Tickets"}
+                                            sublabel={bookingUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 72)}
+                                            onPress={() => openUrl(bookingUrl)}
+                                            palette={palette}
+                                            isDark={isDark}
+                                        />
+                                    ) : null}
+                                    {listingUrl && listingUrl !== bookingUrl ? (
+                                        <ActionRow
+                                            icon="open-outline"
+                                            label={primaryLinkLabel}
+                                            sublabel={listingUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 72)}
+                                            onPress={() => openUrl(listingUrl)}
+                                            palette={palette}
+                                            isDark={isDark}
+                                        />
+                                    ) : listingUrl ? (
                                         <ActionRow
                                             icon="open-outline"
                                             label={primaryLinkLabel}
@@ -796,6 +909,56 @@ const styles = StyleSheet.create({
         fontSize: 13,
         fontWeight: "600",
         flexShrink: 1,
+    },
+    sourceRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        marginBottom: 12,
+    },
+    sourceTag: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 5,
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+        borderRadius: 20,
+    },
+    sourceTagText: {
+        fontSize: 12,
+        fontWeight: "700",
+    },
+    bookTicketBtn: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 8,
+        paddingVertical: 14,
+        paddingHorizontal: 20,
+        borderRadius: 14,
+        marginBottom: 20,
+    },
+    bookTicketBtnText: {
+        color: "#fff",
+        fontSize: 16,
+        fontWeight: "700",
+        flex: 1,
+        textAlign: "center",
+    },
+    reasonBanner: {
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: 8,
+        borderWidth: 1,
+        borderRadius: 14,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        marginBottom: 18,
+    },
+    reasonBannerText: {
+        flex: 1,
+        fontSize: 13,
+        fontWeight: "600",
+        lineHeight: 18,
     },
     sectionHeader: {
         fontSize: 11,
