@@ -21,11 +21,13 @@ import { INTERACTION_TYPES } from "../utils/constants";
 import { enrichPlaceLocation } from "../utils/placeLocation";
 import { effectivePricingEnabled } from "../utils/pricingDisplay";
 import { useAppTheme } from "../context/ThemeContext";
+import { useInteractionState } from "../context/InteractionStateContext";
 import AuthenticatedPlacePhoto, {
     toPlacePhotoAbsoluteUri,
 } from "../components/AuthenticatedPlacePhoto";
 import { fetchPlaceDetails } from "../api/placeApi";
 import PlaceInteractionBar from "../components/PlaceInteractionBar";
+import RecommendationFeedback from "../components/RecommendationFeedback";
 import { usePlaceInteractions } from "../hooks/usePlaceInteractions";
 import { getDenominationDisplay } from "../utils/denominationDisplay";
 import { safeGoBack } from "../utils/navigationHelpers";
@@ -1318,15 +1320,32 @@ export default function PlaceDetailScreen({ navigation, route }) {
     }, [raw, detailPatch]);
 
     const [activeTab, setActiveTab] = useState("Overview");
-    const [isSaved, setIsSaved] = useState(false);
-    const [isLiked, setIsLiked] = useState(false);
-    const [isDisliked, setIsDisliked] = useState(false);
     const saveAnim = useRef(new Animated.Value(1)).current;
     const openedAtRef = useRef(Date.now());
 
     const bottomPad = Math.max(insets.bottom, 12) + 8;
 
     const leaveDetail = useCallback(() => safeGoBack(navigation), [navigation]);
+
+    // v18: state of this place's like/save/dislike now comes from the shared
+    // interaction store, hydrated from the server, so the heart/bookmark
+    // already reflects the user's history on first render.
+    const {
+        isSaved: isSavedFn,
+        isLiked: isLikedFn,
+        isDisliked: isDislikedFn,
+        markSaved,
+        markRemoveSave,
+        markLiked,
+        markDisliked,
+        markDismissed,
+        markNotInterested,
+    } = useInteractionState();
+
+    const pidForState = place?.placeId ?? place?.id ?? null;
+    const isSaved    = pidForState ? isSavedFn(pidForState)    : false;
+    const isLiked    = pidForState ? isLikedFn(pidForState)    : false;
+    const isDisliked = pidForState ? isDislikedFn(pidForState) : false;
 
     const interactions = usePlaceInteractions(place, {
         source: "place_detail",
@@ -1397,37 +1416,42 @@ export default function PlaceDetailScreen({ navigation, route }) {
         ]).start();
     }
 
-    async function handleSave() {
-        const next = await interactions.handleSave(isSaved);
-        setIsSaved(next);
-        bounceSaveIcon();
-        if (next) {
+    // v18: every mutation flows through the InteractionState store. The store
+    // is responsible for: optimistic Set update, /api/interactions POST,
+    // feed-cache bust. Detail-screen UI just animates and (for dislikes)
+    // navigates back.
+
+    function handleSave() {
+        if (!pidForState) return;
+        if (isSaved) {
+            markRemoveSave({ placeId: pidForState, place, source: "place_detail" });
+        } else {
+            markSaved({ placeId: pidForState, place, source: "place_detail" });
             Alert.alert(
                 "Saved",
                 "Find this place anytime under Profile → Saved places.",
             );
         }
+        bounceSaveIcon();
     }
 
-    async function handleCarouselSave() {
-        await handleSave();
+    function handleCarouselSave() {
+        handleSave();
     }
 
-    async function handleLike() {
-        if (isLiked) return;
-        setIsLiked(true);
-        setIsDisliked(false);
-        await interactions.handleLike();
+    function handleLike() {
+        if (!pidForState || isLiked) return;
+        markLiked({ placeId: pidForState, place, source: "place_detail" });
     }
 
-    async function handleDislike() {
+    function handleDislike() {
+        if (!pidForState) return;
         if (isDisliked) {
             leaveDetail();
             return;
         }
-        setIsDisliked(true);
-        setIsLiked(false);
-        await interactions.handleDislike();
+        markDisliked({ placeId: pidForState, place, source: "place_detail" });
+        leaveDetail();
     }
 
     async function handleShare() {
@@ -1438,13 +1462,16 @@ export default function PlaceDetailScreen({ navigation, route }) {
         await interactions.handleDirections();
     }
 
-    async function handleNotInterested() {
-        setIsDisliked(true);
-        await interactions.handleNotInterested();
+    function handleNotInterested() {
+        if (!pidForState) return;
+        markNotInterested({ placeId: pidForState, place, source: "place_detail" });
+        leaveDetail();
     }
 
-    async function handleBottomDismiss() {
-        await interactions.handleDismiss();
+    function handleBottomDismiss() {
+        if (!pidForState) return;
+        markDismissed({ placeId: pidForState, place, source: "place_detail" });
+        leaveDetail();
     }
 
     // Parse numeric score for star display
@@ -1679,6 +1706,10 @@ export default function PlaceDetailScreen({ navigation, route }) {
                         />
                     )}
                 </View>
+
+                {/* v18: explicit recommendation feedback — feeds bandit + */}
+                {/* preference vector with a high-signal rating per place. */}
+                <RecommendationFeedback place={place} />
             </ScrollView>
 
             {/* Sticky bottom bar */}

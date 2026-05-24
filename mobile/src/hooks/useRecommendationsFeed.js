@@ -6,6 +6,7 @@ import {
 import { getApiErrorMessage } from "../utils/api";
 import {
     buildFeedCacheKey,
+    deleteFeedCache,
     getFeedCache,
     setFeedCache,
 } from "../utils/feedCache";
@@ -22,6 +23,7 @@ import {
  * @param {boolean} [options.geoPrimed=true]
  * @param {string|null} [options.religion]
  * @param {boolean} [options.enabled=true]
+ * @param {((list: object[]) => object[])|null} [options.filterNegative] - strip disliked/dismissed places from every server response
  */
 export function useRecommendationsFeed({
     buildParams,
@@ -32,6 +34,7 @@ export function useRecommendationsFeed({
     geoPrimed = true,
     religion = null,
     enabled = true,
+    filterNegative = null,
 }) {
     const [places, setPlaces] = useState([]);
     const [aiMeta, setAiMeta] = useState(null);
@@ -41,6 +44,8 @@ export function useRecommendationsFeed({
 
     const requestIdRef = useRef(0);
     const hasPlacesRef = useRef(false);
+    const filterNegativeRef = useRef(filterNegative);
+    filterNegativeRef.current = filterNegative;
 
     const cacheKey = buildFeedCacheKey({
         scope,
@@ -52,32 +57,46 @@ export function useRecommendationsFeed({
 
     const load = useCallback(
         async (opts = {}) => {
-            const { showFullLoader = false } = opts;
+            const { showFullLoader = false, forceRefresh = false } = opts;
             if (!enabled) return;
 
             const reqId = ++requestIdRef.current;
 
-            const cached = getFeedCache(cacheKey);
+            if (forceRefresh) {
+                deleteFeedCache(cacheKey);
+            }
+
+            const cached = forceRefresh ? null : getFeedCache(cacheKey);
             if (cached?.places?.length) {
                 setPlaces(cached.places);
                 setAiMeta(cached.aiMeta);
                 hasPlacesRef.current = true;
                 setLoading(false);
                 setError("");
-            } else if (showFullLoader && !hasPlacesRef.current) {
+            } else if (showFullLoader && !hasPlacesRef.current && !forceRefresh) {
                 setLoading(true);
             }
 
             try {
                 setError("");
-                const envelope = await getRecommendations(buildParams(filter));
+                const params = {
+                    ...buildParams(filter),
+                    ...(forceRefresh ? { refresh: "true" } : {}),
+                };
+                const envelope = await getRecommendations(params);
                 if (reqId !== requestIdRef.current) return;
 
                 const { recommendations, meta } =
                     parseRecommendationsResponse(envelope);
 
                 const raw = Array.isArray(recommendations) ? recommendations : [];
-                const processed = transformResults(raw, meta, filter);
+                const transformed = transformResults(raw, meta, filter);
+                // Strip places the user has already disliked / dismissed so they
+                // never reappear in the feed after a server re-fetch.
+                const filterFn = filterNegativeRef.current;
+                const processed = typeof filterFn === "function"
+                    ? filterFn(transformed)
+                    : transformed;
 
                 setPlaces(processed);
                 setAiMeta(meta?.ai ?? null);
@@ -108,7 +127,7 @@ export function useRecommendationsFeed({
 
     const refresh = useCallback(async () => {
         setRefreshing(true);
-        await load({ showFullLoader: false });
+        await load({ showFullLoader: false, forceRefresh: true });
     }, [load]);
 
     return {

@@ -130,6 +130,35 @@ def get_preference_vector(user_id: str) -> dict[str, float]:
         return dict(_preference_vectors.get(user_id, {}))
 
 
+def snapshot_preference_vectors() -> dict[str, dict[str, float]]:
+    """
+    Returns a deep-ish copy of every user's preference vector, suitable for
+    JSON serialisation. Used by store.model_store.save_all to persist adaptive
+    memory across service restarts.
+    """
+    with _pref_lock:
+        return {uid: dict(vec) for uid, vec in _preference_vectors.items()}
+
+
+def hydrate_preference_vectors(state: dict[str, dict[str, float]]) -> None:
+    """
+    Replaces the in-memory preference vector store with the supplied snapshot.
+    Called once at startup from store.model_store.load_all so previously-learned
+    affinity isn't wiped on every redeploy.
+    """
+    if not isinstance(state, dict):
+        return
+    with _pref_lock:
+        _preference_vectors.clear()
+        for uid, vec in state.items():
+            if not isinstance(vec, dict):
+                continue
+            _preference_vectors[uid] = {
+                str(k): float(v) for k, v in vec.items()
+                if isinstance(v, (int, float))
+            }
+
+
 def get_top_categories(user_id: str, n: int = 5) -> list[tuple[str, float]]:
     """Return the top-N categories by affinity score (highest first)."""
     vec = get_preference_vector(user_id)

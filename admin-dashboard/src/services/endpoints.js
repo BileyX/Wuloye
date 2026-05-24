@@ -24,8 +24,13 @@ export const endpoints = {
   adminPlaces: "/admin/places",
   adminPlacesMeta: "/admin/places/meta",
   adminAnalytics: "/admin/analytics",
+  adminOnboardingInsights: "/admin/analytics/onboarding",
   adminAiInsights: "/admin/ai/insights",
   adminNotifications: "/admin/notifications",
+  adminRecommendationControl: "/admin/recommendation-control",
+  adminRecommendationAnalytics: "/admin/recommendation-analytics",
+  adminTrending: "/admin/trending",
+  adminTrendingFeed: "/admin/trending/feed",
 
   // Dev (dev mode only)
   devUser: "/dev/user",
@@ -110,6 +115,11 @@ export async function getAdminEvents(params = {}) {
 
 export async function getEventsStats() {
   const response = await apiClient.get(endpoints.eventsStats);
+  return response.data;
+}
+
+export async function createAdminEvent(data) {
+  const response = await apiClient.post(endpoints.events, data);
   return response.data;
 }
 
@@ -208,6 +218,11 @@ export async function getAdminAnalytics() {
   return response.data;
 }
 
+export async function getAdminOnboardingInsights() {
+  const response = await apiClient.get(endpoints.adminOnboardingInsights);
+  return response.data;
+}
+
 // ─── Admin: AI Insights ───────────────────────────────────────────────────────
 
 export async function getAdminAiInsights() {
@@ -222,8 +237,77 @@ export async function sendAdminNotification(data) {
   return response.data;
 }
 
+/** Alias used by NotificationsAdminPage — maps {title, body, severity} → backend {title, message, type}. */
+export async function postAdminAnnouncement({ title, body, severity }) {
+  const response = await apiClient.post(endpoints.adminNotifications, {
+    title,
+    message: body,
+    type: severity ?? "announcement",
+  });
+  return response.data;
+}
+
 export async function getAdminNotifications() {
   const response = await apiClient.get(endpoints.adminNotifications);
+  return response.data;
+}
+
+// ─── Admin: Recommendation Control Center ────────────────────────────────────
+
+export async function getAdminRecommendationControl(params = {}) {
+  const response = await apiClient.get(endpoints.adminRecommendationControl, { params });
+  return response.data;
+}
+
+export async function createAdminRecommendation(data) {
+  const response = await apiClient.post(endpoints.adminRecommendationControl, data);
+  return response.data;
+}
+
+export async function updateAdminRecommendation(id, data) {
+  const response = await apiClient.put(`${endpoints.adminRecommendationControl}/${id}`, data);
+  return response.data;
+}
+
+export async function deleteAdminRecommendation(id) {
+  const response = await apiClient.delete(`${endpoints.adminRecommendationControl}/${id}`);
+  return response.data;
+}
+
+export async function boostAdminRecommendation(id, boostData) {
+  const response = await apiClient.patch(`${endpoints.adminRecommendationControl}/${id}/boost`, boostData);
+  return response.data;
+}
+
+export async function featureAdminRecommendation(id, featured) {
+  const response = await apiClient.patch(`${endpoints.adminRecommendationControl}/${id}/feature`, { featured });
+  return response.data;
+}
+
+export async function getAdminRecommendationAnalytics() {
+  const response = await apiClient.get(endpoints.adminRecommendationAnalytics);
+  return response.data;
+}
+
+// ─── Admin: Trending Management ──────────────────────────────────────────────
+
+export async function getAdminTrending(params = {}) {
+  const response = await apiClient.get(endpoints.adminTrending, { params });
+  return response.data;
+}
+
+export async function createAdminTrending(data) {
+  const response = await apiClient.post(endpoints.adminTrending, data);
+  return response.data;
+}
+
+export async function updateAdminTrending(id, data) {
+  const response = await apiClient.patch(`${endpoints.adminTrending}/${id}`, data);
+  return response.data;
+}
+
+export async function deleteAdminTrending(id) {
+  const response = await apiClient.delete(`${endpoints.adminTrending}/${id}`);
   return response.data;
 }
 

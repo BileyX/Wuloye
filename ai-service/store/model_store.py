@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 _BANDIT_PATH   = os.path.join(config.DATA_DIR, "bandit_state.json")
 _SEQ_PATH      = os.path.join(config.DATA_DIR, "sequence_model.json")
 _META_PATH     = os.path.join(config.DATA_DIR, "model_meta.json")
+# v18 — Adaptive preference vector per user, persisted across restarts so the
+# AI's learned category affinity is not wiped every time the service redeploys.
+_PREF_VEC_PATH = os.path.join(config.DATA_DIR, "preference_vectors.json")
 
 # ─── Default metadata ────────────────────────────────────────────────────────
 
@@ -109,6 +112,19 @@ def load_all() -> dict[str, Any]:
     else:
         logger.info("[store] sequence model — no saved weights; model untrained")
 
+    # v18 — Preference vectors (real-time adaptive memory).
+    # Imported lazily to avoid a circular import at module load time.
+    pref_state = _read_json(_PREF_VEC_PATH)
+    if pref_state and isinstance(pref_state, dict):
+        try:
+            from learning import realtime as _rt
+            _rt.hydrate_preference_vectors(pref_state)
+            logger.info("[store] preference vectors loaded — %d users", len(pref_state))
+        except Exception as exc:
+            logger.warning("[store] preference vector hydrate failed: %s", exc)
+    else:
+        logger.info("[store] preference vectors — no saved state; starting cold")
+
     # Metadata
     meta = _read_json(_META_PATH) or _default_meta()
     return meta
@@ -135,6 +151,15 @@ def save_all(
         sd = sm.state_dict()
         if sd is not None:
             _write_json(_SEQ_PATH, _tensor_to_list(sd))
+
+    # v18 — Preference vectors (per-user adaptive memory).
+    try:
+        from learning import realtime as _rt
+        snapshot = _rt.snapshot_preference_vectors()
+        if snapshot:
+            _write_json(_PREF_VEC_PATH, snapshot)
+    except Exception as exc:
+        logger.warning("[store] preference vector persist failed: %s", exc)
 
     # Bump version
     existing_meta = _read_json(_META_PATH) or _default_meta()

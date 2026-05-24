@@ -75,6 +75,27 @@ export async function getPlaceDetails(placeId, options = {}) {
 export const fetchPlaceDetails = getPlaceDetails;
 
 /**
+ * v18: Fetches the user's saved-places list from the dedicated endpoint.
+ * Returns an array of enriched place objects sorted newest-saved first.
+ *
+ * Falls back to `null` on 404 so callers can decide to use the legacy
+ * interaction-replay strategy (useful during a rolling backend deploy).
+ *
+ * @returns {Promise<object[]|null>}
+ */
+export async function getSavedPlaces() {
+    try {
+        const { data } = await apiClient.get("/places/saved", { timeout: 20_000 });
+        const items = unwrapApiData(data, []);
+        return Array.isArray(items) ? items : [];
+    } catch (err) {
+        const status = err?.response?.status;
+        if (status === 404) return null; // endpoint not yet deployed
+        throw err;
+    }
+}
+
+/**
  * Returns a fully-resolved URL for a Google Place photo.
  * The backend proxies the request so the API key stays server-side.
  *

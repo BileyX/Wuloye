@@ -566,5 +566,101 @@
       "alpha": 1.5,
       "beta": 1.0
     }
+  },
+  "VoDXUddYUZRESPIYIxUC5cMQdBA2": {
+    "gym": {
+      "alpha": 10.7,
+      "beta": 7.0
+    },
+    "yoga": {
+      "alpha": 1.5,
+      "beta": 1.0
+    },
+    "coffee": {
+      "alpha": 53.2,
+      "beta": 7.0
+    },
+    "cafe": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "restaurant": {
+      "alpha": 4.0,
+      "beta": 4.0
+    },
+    "social": {
+      "alpha": 46.2,
+      "beta": 10.0
+    },
+    "outdoor": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "park": {
+      "alpha": 6.5,
+      "beta": 4.0
+    },
+    "hotel": {
+      "alpha": 36.7,
+      "beta": 16.0
+    },
+    "sports": {
+      "alpha": 2.0,
+      "beta": 1.0
+    }
+  },
+  "Blnqiv7QDJQITQaD0wkJThpYngl1": {
+    "gym": {
+      "alpha": 9.2,
+      "beta": 4.0
+    },
+    "yoga": {
+      "alpha": 2.0,
+      "beta": 1.0
+    },
+    "coffee": {
+      "alpha": 8.5,
+      "beta": 5.5
+    },
+    "cafe": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "restaurant": {
+      "alpha": 3.0,
+      "beta": 8.5
+    },
+    "social": {
+      "alpha": 9.0,
+      "beta": 1.0
+    },
+    "outdoor": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "park": {
+      "alpha": 3.5,
+      "beta": 4.0
+    },
+    "study": {
+      "alpha": 10.5,
+      "beta": 7.0
+    },
+    "hotel": {
+      "alpha": 3.0,
+      "beta": 2.5
+    },
+    "sports": {
+      "alpha": 1.5,
+      "beta": 1.0
+    },
+    "church": {
+      "alpha": 11.0,
+      "beta": 1.0
+    },
+    "event": {
+      "alpha": 5.5,
+      "beta": 1.0
+    }
   }
 }

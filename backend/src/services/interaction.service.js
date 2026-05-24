@@ -33,10 +33,9 @@ import {
   sendInteractionFeedbackBatch,
 } from "./aiFeedback.service.js";
 import {
-  recommendationCache,
-  profileDataCache,
-  derivedSignalsCache,
+  invalidateUserRecommendationCaches,
 } from "../utils/cache.js";
+import { invalidatePlanForUser } from "./aiSchedule.service.js";
 import {
   isExperimentActive,
   getVariantForUser,
@@ -44,7 +43,25 @@ import {
 } from "../utils/experiment.js";
 import { logger } from "../utils/logger.js";
 
+/** Passive impressions — update intelligence but must not bust the feed cache. */
+const PASSIVE_FEED_ACTIONS = new Set([
+  "view",
+  "click",
+  "search",
+  "filter_use",
+]);
+
+function shouldInvalidateRecommendationCache(actionType) {
+  return !PASSIVE_FEED_ACTIONS.has(actionType);
+}
+
 const INTERACTIONS_COLLECTION = "interactions";
+
+/** Place type from mobile metadata when Google place_id is not in the catalogue. */
+function resolveTypeFromMetadata(metadata) {
+  const raw = metadata?.place?.type;
+  return typeof raw === "string" && raw.trim() ? raw.trim().toLowerCase() : null;
+}
 
 /** Phase 17: optional top-level fields when EXPERIMENT_ACTIVE=true */
 const experimentStampForUser = (userId) => {
@@ -169,10 +186,11 @@ export const createInteraction = async (userId, placeId, actionType, metadata = 
   // the caller's response and neither can roll back the interaction write.
   const { catalogueId, type } = await resolvePlaceInfo(placeId);
   const effectivePlaceId = catalogueId ?? placeId;
+  const effectiveType    = type ?? resolveTypeFromMetadata(metadata);
 
   await Promise.all([
-    updateUserIntelligence(userId, type, effectivePlaceId, actionType),
-    updateSession(userId, { placeId: effectivePlaceId, type, actionType }),
+    updateUserIntelligence(userId, effectiveType, effectivePlaceId, actionType),
+    updateSession(userId, { placeId: effectivePlaceId, type: effectiveType, actionType }),
   ]);
 
   // Fire-and-forget: real-time AI bandit update on every interaction.
@@ -181,7 +199,7 @@ export const createInteraction = async (userId, placeId, actionType, metadata = 
   sendInteractionFeedback({
     userId,
     placeId:   effectivePlaceId,
-    placeType: type,
+    placeType: effectiveType,
     actionType,
   }).catch((err) =>
     logger.warn(`[interaction] AI feedback dispatch failed: ${err.message}`),
@@ -193,13 +211,13 @@ export const createInteraction = async (userId, placeId, actionType, metadata = 
   );
 
   // ── Phase 15: Cache invalidation ─────────────────────────────────────────────
-  // Flush this user's recommendation cache so the very next request sees their
-  // new interaction reflected immediately.  The profile data bundle is also
-  // invalidated so updated affinity, embedding and session data is re-fetched.
-  recommendationCache.deleteByPrefix(`rec:${userId}:`);
-  profileDataCache.delete(`pd:${userId}`);
-  derivedSignalsCache.deleteByPrefix(`ds:${userId}:`);
-  logger.info(`[interaction] caches invalidated for uid=${userId}`);
+  // Only strong learning signals bust the recommendation cache. Passive views /
+  // clicks still update intelligence but must not trigger a feed reload loop.
+  if (shouldInvalidateRecommendationCache(actionType)) {
+    invalidateUserRecommendationCaches(userId);
+    invalidatePlanForUser(userId);
+    logger.info(`[interaction] caches invalidated for uid=${userId}`);
+  }
 
   return interaction;
 };
@@ -264,15 +282,20 @@ export const createInteractionsBatch = async (userId, items) => {
   for (const interaction of results) {
     const { catalogueId, type } = await resolvePlaceInfo(interaction.placeId);
     const effectivePlaceId = catalogueId ?? interaction.placeId;
+    const effectiveType    = type ?? resolveTypeFromMetadata(interaction.metadata);
     await Promise.all([
-      updateUserIntelligence(userId, type, effectivePlaceId, interaction.actionType),
-      updateSession(userId, { placeId: effectivePlaceId, type, actionType: interaction.actionType }),
+      updateUserIntelligence(userId, effectiveType, effectivePlaceId, interaction.actionType),
+      updateSession(userId, {
+        placeId: effectivePlaceId,
+        type: effectiveType,
+        actionType: interaction.actionType,
+      }),
     ]);
-    if (type) {
+    if (effectiveType) {
       aiFeedbackEvents.push({
         userId,
         placeId:    effectivePlaceId,
-        placeType:  type,
+        placeType:  effectiveType,
         actionType: interaction.actionType,
       });
     }
@@ -290,10 +313,14 @@ export const createInteractionsBatch = async (userId, items) => {
     logger.warn(`[interaction] retrainModel check failed: ${err.message}`)
   );
 
-  recommendationCache.deleteByPrefix(`rec:${userId}:`);
-  profileDataCache.delete(`pd:${userId}`);
-  derivedSignalsCache.deleteByPrefix(`ds:${userId}:`);
-  logger.info(`[interaction] batch (${results.length}) caches invalidated for uid=${userId}`);
+  const hasLearningSignal = results.some((ix) =>
+    shouldInvalidateRecommendationCache(ix.actionType),
+  );
+  if (hasLearningSignal) {
+    invalidateUserRecommendationCaches(userId);
+    invalidatePlanForUser(userId);
+    logger.info(`[interaction] batch (${results.length}) caches invalidated for uid=${userId}`);
+  }
 
   return results;
 };

@@ -20,9 +20,11 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAppTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
+import { useInteractionState } from "../context/InteractionStateContext";
 import { createInteraction, createInteractionsBatch } from "../api/interactionApi";
 import { INTERACTION_TYPES } from "../utils/constants";
 import { normalisePlace } from "../utils/recommendationPlaces";
+import { removePlaceFromList } from "../utils/feedAnimations";
 import {
     filterDiscoverItemsByCategory,
     filterReligiousPlacesByUserReligion,
@@ -419,15 +421,40 @@ export default function DiscoverScreen({ navigation, route }) {
     const isNearbyMode = routeMode === "nearby";
 
     const [selectedFilter, setSelectedFilter] = useState("all");
-    const [likedPlaceIds, setLikedPlaceIds] = useState(() => new Set());
-    const [savedPlaceIds, setSavedPlaceIds] = useState(() => new Set());
+    // v18: liked/saved/disliked now live in the shared interaction store
+    // (single source of truth across every screen + app restart).
+    const {
+        liked: likedPlaceIds,
+        saved: savedPlaceIds,
+        disliked: dislikedPlaceIds,
+        dismissed: dismissedPlaceIds,
+        markLiked,
+        markSaved,
+        markRemoveSave,
+        markDisliked,
+        markDismissed,
+    } = useInteractionState();
 
-    const refreshTimerRef = useRef(null);
     const headerAnim = useRef(new Animated.Value(0)).current;
     const { location: geoLocation, requestCurrentLocation } = useLocation();
     const [geoPrimed, setGeoPrimed] = useState(false);
 
     const userReligion = profile?.religion ?? null;
+
+    // Strip places the user has disliked or dismissed so they never resurface
+    // after a server re-fetch (same logic as HomeScreen.filterNegative).
+    const filterNegative = useCallback(
+        (list) => {
+            if (!Array.isArray(list) || (dislikedPlaceIds.size === 0 && dismissedPlaceIds.size === 0)) {
+                return list;
+            }
+            return list.filter((p) => {
+                const id = p.placeId ?? p.id;
+                return !dislikedPlaceIds.has(id) && !dismissedPlaceIds.has(id);
+            });
+        },
+        [dislikedPlaceIds, dismissedPlaceIds],
+    );
 
     useEffect(() => {
         let cancelled = false;
@@ -494,6 +521,7 @@ export default function DiscoverScreen({ navigation, route }) {
 
     const {
         places,
+        setPlaces,
         aiMeta,
         loading,
         refreshing,
@@ -509,6 +537,7 @@ export default function DiscoverScreen({ navigation, route }) {
         geoPrimed,
         religion: userReligion,
         enabled: geoPrimed,
+        filterNegative,
     });
 
     const lastImpressionRef = useRef("");
@@ -528,15 +557,6 @@ export default function DiscoverScreen({ navigation, route }) {
         }));
         createInteractionsBatch(impressions).catch(() => null);
     }, [places, selectedFilter, isNearbyMode]);
-
-    useEffect(() => () => clearTimeout(refreshTimerRef.current), []);
-
-    const scheduleRefresh = useCallback(() => {
-        clearTimeout(refreshTimerRef.current);
-        refreshTimerRef.current = setTimeout(() => {
-            refresh().catch(() => null);
-        }, 1500);
-    }, [refresh]);
 
     async function handleRefresh() {
         setRefreshing(true);
@@ -631,47 +651,66 @@ export default function DiscoverScreen({ navigation, route }) {
 
     function handleSave(place) {
         const id = place.placeId ?? place.id;
-        setSavedPlaceIds((prev) => {
-            const next = new Set(prev);
-            next.add(id);
-            return next;
-        });
-        createInteraction({
-            placeId: id,
-            actionType: INTERACTION_TYPES.SAVE,
-            metadata: { source: "discover_feed", filter: selectedFilter },
-        }).catch(() => null);
-        scheduleRefresh();
+        const already = savedPlaceIds.has(id);
+        const meta = { source: "discover_feed", filter: selectedFilter };
+        if (already) {
+            markRemoveSave({ placeId: id, place, ...meta });
+        } else {
+            markSaved({ placeId: id, place, ...meta });
+        }
     }
 
     function handleDismiss(place) {
         const id = place.placeId ?? place.id;
-        setPlaces((curr) => curr.filter((p) => (p.placeId ?? p.id) !== id));
-        createInteraction({
+        removePlaceFromList(setPlaces, id);
+        markDismissed({
             placeId: id,
-            actionType: INTERACTION_TYPES.DISMISS,
-            metadata: { source: "discover_feed", filter: selectedFilter },
-        }).catch(() => null);
-        scheduleRefresh();
+            place,
+            source: "discover_feed",
+            filter: selectedFilter,
+        });
     }
 
     function handleLike(place) {
         const id = place.placeId ?? place.id;
-        const already = likedPlaceIds.has(id);
-        setLikedPlaceIds((prev) => {
-            const next = new Set(prev);
-            if (already) next.delete(id);
-            else next.add(id);
-            return next;
+        if (likedPlaceIds.has(id)) return;
+        markLiked({
+            placeId: id,
+            place,
+            source: "discover_feed",
+            filter: selectedFilter,
         });
-        if (!already) {
-            createInteraction({
-                placeId: id,
-                actionType: INTERACTION_TYPES.LIKE,
-                metadata: { source: "discover_feed", filter: selectedFilter },
-            }).catch(() => null);
-            scheduleRefresh();
-        }
+    }
+
+    function handleDislike(place) {
+        const id = place.placeId ?? place.id;
+        if (dislikedPlaceIds.has(id)) return;
+
+        const name = place?.name?.trim() || "This place";
+        const typeHint = place?.type
+            ? `${place.type.replace(/_/g, " ")} places`
+            : "similar places";
+
+        Alert.alert(
+            "Not for me",
+            `${name} and ${typeHint} like it won't be recommended again.`,
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Don't recommend",
+                    style: "destructive",
+                    onPress: () => {
+                        removePlaceFromList(setPlaces, id);
+                        markDisliked({
+                            placeId: id,
+                            place,
+                            source: "discover_feed",
+                            filter: selectedFilter,
+                        });
+                    },
+                },
+            ],
+        );
     }
 
     // ── Render ─────────────────────────────────────────────────────────────────
@@ -917,8 +956,10 @@ export default function DiscoverScreen({ navigation, route }) {
                                 onPressIn={() => prefetchDiscoverDetail(item)}
                                 liked={likedPlaceIds.has(item.placeId ?? item.id)}
                                 saved={savedPlaceIds.has(item.placeId ?? item.id)}
+                                disliked={dislikedPlaceIds.has(item.placeId ?? item.id)}
                                 onLike={() => handleLike(item)}
                                 onSave={() => handleSave(item)}
+                                onDislike={() => handleDislike(item)}
                                 onDismiss={() => handleDismiss(item)}
                             />
                         )}

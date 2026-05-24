@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 import { Animated, Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
@@ -8,22 +8,27 @@ import { effectivePricingEnabled } from "../utils/pricingDisplay";
 import { getPlaceVisualMeta } from "../utils/placeVisuals";
 
 /**
- * Feed card — three quick actions: like · save · pass (social-style).
+ * Feed card — four quick actions: like · save · dislike · pass.
+ *   • dislike is the strong "never show me this again" signal (persistent block).
+ *   • dismiss is the soft "not right now" signal (penalised but can return).
  * Share, directions, and deeper feedback live on PlaceDetailScreen.
  */
-export default function PlaceCard({
+function PlaceCard({
     place,
     onPress,
     onPressIn,
     onLike,
     onSave,
+    onDislike,
     onDismiss,
     liked = false,
     saved = false,
+    disliked = false,
 }) {
     const hasActions =
         typeof onLike === "function" ||
         typeof onSave === "function" ||
+        typeof onDislike === "function" ||
         typeof onDismiss === "function";
 
     const { palette, gradients, isDark } = useAppTheme();
@@ -63,6 +68,13 @@ export default function PlaceCard({
     })();
     const llmReason  = place?.reason || null;
     const overBudget = showPricing && place?.matches?.budget === false;
+
+    // Admin curation badges
+    const isFeatured    = Boolean(place?.featured);
+    const isTrending    = Boolean(place?.trending);
+    const isAdminPick   = Boolean(place?.adminCurated);
+    const isSponsored   = Boolean(place?.sponsored);
+    const showAdminBadge = isFeatured || isTrending || isAdminPick || isSponsored;
 
     // Derive numeric match score from "92% match" string
     const numericScore = useMemo(() => {
@@ -185,6 +197,35 @@ export default function PlaceCard({
 
                         <Text style={styles.title}>{place?.name ?? "Place name"}</Text>
 
+                        {/* ── Admin curation badges (Featured / Trending / Admin Pick / Sponsored) ── */}
+                        {showAdminBadge && (
+                            <View style={styles.adminBadgeRow}>
+                                {isFeatured && (
+                                    <View style={[styles.adminBadge, { backgroundColor: "#FEF3C71A", borderColor: "#D97706" }]}>
+                                        <Ionicons name="star" size={9} color="#D97706" />
+                                        <Text style={[styles.adminBadgeText, { color: "#D97706" }]}>Featured</Text>
+                                    </View>
+                                )}
+                                {isTrending && (
+                                    <View style={[styles.adminBadge, { backgroundColor: "#FFF7ED1A", borderColor: "#EA580C" }]}>
+                                        <Ionicons name="trending-up" size={9} color="#EA580C" />
+                                        <Text style={[styles.adminBadgeText, { color: "#EA580C" }]}>Trending</Text>
+                                    </View>
+                                )}
+                                {isAdminPick && !isFeatured && (
+                                    <View style={[styles.adminBadge, { backgroundColor: "#EFF6FF1A", borderColor: "#2563EB" }]}>
+                                        <Ionicons name="shield-checkmark" size={9} color="#2563EB" />
+                                        <Text style={[styles.adminBadgeText, { color: "#2563EB" }]}>Curated Pick</Text>
+                                    </View>
+                                )}
+                                {isSponsored && (
+                                    <View style={[styles.adminBadge, { backgroundColor: "#F5F3FF1A", borderColor: "#7C3AED" }]}>
+                                        <Text style={[styles.adminBadgeText, { color: "#7C3AED" }]}>Sponsored</Text>
+                                    </View>
+                                )}
+                            </View>
+                        )}
+
                         {/* ── Denomination match chip (churches only) ── */}
                         {denomLabel ? (
                             <View style={[styles.denomChip, { backgroundColor: `${denomColor}15`, borderColor: `${denomColor}40` }]}>
@@ -282,11 +323,31 @@ export default function PlaceCard({
                                             />
                                         </Pressable>
                                     ) : null}
+                                    {typeof onDislike === "function" ? (
+                                        <Pressable
+                                            onPress={() => onDislike()}
+                                            hitSlop={10}
+                                            style={[
+                                                styles.feedActionBtn,
+                                                disliked && styles.feedActionBtnDisliked,
+                                            ]}
+                                            accessibilityLabel="Not for me — stop recommending this place and similar spots"
+                                            accessibilityHint="Opens a confirmation before learning your preference"
+                                        >
+                                            <Ionicons
+                                                name={disliked ? "thumbs-down" : "thumbs-down-outline"}
+                                                size={17}
+                                                color={disliked ? "#B91C1C" : palette.textSecondary}
+                                            />
+                                        </Pressable>
+                                    ) : null}
                                     {typeof onDismiss === "function" ? (
                                         <Pressable
                                             onPress={() => onDismiss()}
                                             hitSlop={10}
-                                            style={[styles.feedActionBtn, styles.feedActionBtnMuted]}
+                                            style={[styles.feedActionBtn, styles.feedActionBtnDismiss]}
+                                            accessibilityLabel="Hide this recommendation"
+                                            accessibilityHint="Removes this card from your feed for now"
                                         >
                                             <Ionicons
                                                 name="close"
@@ -304,6 +365,24 @@ export default function PlaceCard({
         </Animated.View>
     );
 }
+
+function placeCardPropsEqual(prev, next) {
+    const prevId = prev.place?.placeId ?? prev.place?.id;
+    const nextId = next.place?.placeId ?? next.place?.id;
+    return (
+        prevId === nextId &&
+        prev.liked === next.liked &&
+        prev.saved === next.saved &&
+        prev.disliked === next.disliked &&
+        prev.onPress === next.onPress &&
+        prev.onLike === next.onLike &&
+        prev.onSave === next.onSave &&
+        prev.onDislike === next.onDislike &&
+        prev.onDismiss === next.onDismiss
+    );
+}
+
+export default memo(PlaceCard, placeCardPropsEqual);
 
 function createStyles(palette, isDark) {
     return StyleSheet.create({
@@ -451,6 +530,27 @@ function createStyles(palette, isDark) {
             fontSize: 10,
             fontWeight: "700",
         },
+        adminBadgeRow: {
+            flexDirection: "row",
+            flexWrap: "wrap",
+            gap: 5,
+            marginTop: 6,
+            marginBottom: 2,
+        },
+        adminBadge: {
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 3,
+            paddingHorizontal: 7,
+            paddingVertical: 3,
+            borderRadius: 999,
+            borderWidth: 1,
+        },
+        adminBadgeText: {
+            fontSize: 9,
+            fontWeight: "700",
+            letterSpacing: 0.3,
+        },
         footerRow: {
             marginTop: 14,
             flexDirection: "row",
@@ -495,6 +595,9 @@ function createStyles(palette, isDark) {
         feedActionBtnMuted: {
             backgroundColor: isDark ? "rgba(30,45,60,0.5)" : "rgba(240,245,250,0.9)",
         },
+        feedActionBtnDismiss: {
+            backgroundColor: isDark ? "rgba(30,45,60,0.5)" : "rgba(240,245,250,0.9)",
+        },
         feedActionBtnLiked: {
             backgroundColor: isDark ? "rgba(239,68,68,0.15)" : "rgba(254,226,226,0.9)",
             borderColor: "rgba(239,68,68,0.35)",
@@ -502,6 +605,10 @@ function createStyles(palette, isDark) {
         feedActionBtnSaved: {
             backgroundColor: isDark ? "rgba(15,124,199,0.18)" : "rgba(219,242,255,0.95)",
             borderColor: "rgba(15,124,199,0.40)",
+        },
+        feedActionBtnDisliked: {
+            backgroundColor: isDark ? "rgba(185,28,28,0.18)" : "rgba(254,226,226,0.95)",
+            borderColor: "rgba(185,28,28,0.40)",
         },
     });
 }

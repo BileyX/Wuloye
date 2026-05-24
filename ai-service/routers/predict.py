@@ -155,6 +155,13 @@ class ContextIn(BaseModel):
     discover_category:  Optional[str]              = None
     # Display
     explain:            Optional[bool]             = False  # set true to fill `reason`
+    # v18 — Persistent per-place negative memory forwarded from backend.
+    # These IDs survive far beyond the recent-interactions window, so the AI
+    # never re-suggests something the user explicitly rejected.
+    disliked_place_ids:       Optional[list[str]] = Field(default_factory=list)
+    dismissed_place_ids:      Optional[list[str]] = Field(default_factory=list)
+    not_interested_place_ids: Optional[list[str]] = Field(default_factory=list)
+    saved_place_ids:          Optional[list[str]] = Field(default_factory=list)
 
     # Be permissive about unknown keys from future backend versions so a new
     # field never throws 422 and breaks the whole recommendation pipeline.
@@ -322,6 +329,67 @@ def _gender_score(candidate: "CandidateIn", gender: str) -> float:
     return 0.0
 
 
+def _location_preference_score(ptype: str, location_preference: str) -> float:
+    """
+    v18: Returns a small adjustment based on the user's indoor/outdoor preference.
+    Outdoor-leaning users get a boost on outdoor place types and a small penalty
+    on strictly indoor ones; indoor-leaning users get the inverse.
+    """
+    lp = (location_preference or "").strip().lower()
+    if lp in ("", "any"):
+        return 0.0
+
+    outdoor_types = {"outdoor", "park", "hiking", "sports"}
+    indoor_types  = {"cafe", "coffee", "workspace", "coworking", "library",
+                     "cinema", "theater", "museum", "art", "gallery",
+                     "spa", "gym", "yoga", "shop", "mall"}
+
+    if lp == "outdoor":
+        if ptype in outdoor_types: return  0.06
+        if ptype in indoor_types:  return -0.04
+        return 0.0
+    if lp == "indoor":
+        if ptype in indoor_types:  return  0.05
+        if ptype in outdoor_types: return -0.05
+        return 0.0
+    return 0.0
+
+
+def _daily_routine_score(ptype: str, time_of_day: str, daily_routine: dict) -> float:
+    """
+    v18: Reads the structured daily_routine block from onboarding and rewards
+    place types that line up with the user's stated activities in the matching
+    time slot. The block looks like:
+
+        {
+          "morning":   {"activities": ["gym", "coffee"], ...},
+          "afternoon": {"activities": ["work"],         ...},
+          "evening":   {"activities": ["walk"],         ...},
+        }
+    """
+    if not daily_routine or not isinstance(daily_routine, dict):
+        return 0.0
+    slot = (time_of_day or "").lower()
+    if slot not in ("morning", "afternoon", "evening", "night"):
+        return 0.0
+    block = daily_routine.get(slot) or daily_routine.get("evening" if slot == "night" else slot)
+    if not isinstance(block, dict):
+        return 0.0
+
+    activities = block.get("activities") or block.get("preferred_activities") or []
+    if not isinstance(activities, list) or not activities:
+        return 0.0
+
+    boost = 0.0
+    for activity in activities:
+        related = ACTIVITY_TO_PLACE_TYPES.get(str(activity).lower(), [])
+        if ptype in related:
+            boost += 0.04
+            if boost >= 0.10:
+                break
+    return min(0.10, boost)
+
+
 def _schedule_fit_score(ptype: str, time_of_day: str, wake_time: str, sleep_time: str) -> float:
     """
     Returns a penalty in [-0.08, 0.0] when the recommended place type conflicts
@@ -443,6 +511,9 @@ def _score_candidate(
     interaction_types: list[str],
     user_budget_tier:  str,
     user_persona     = None,  # UserPersona | None — passed from predict()
+    hard_block_ids:  Optional[set[str]] = None,
+    dismissed_ids:   Optional[set[str]] = None,
+    saved_ids:       Optional[set[str]] = None,
 ) -> RankedPlace:
     """
     Full onboarding-driven + adaptive scoring pipeline.
@@ -462,6 +533,32 @@ def _score_candidate(
     """
     try:
         ptype = candidate.place_type.lower()
+
+        # ── 0. v18: Per-place negative memory (defence in depth) ────────────
+        # Backend already pre-filters disliked / not_interested before sending
+        # candidates here, but if anything slipped through we crush the score
+        # so it can never surface near the top regardless of other boosts.
+        if hard_block_ids and candidate.place_id in hard_block_ids:
+            return RankedPlace(
+                place_id=candidate.place_id,
+                ai_score=0.0,
+                bandit_score=0.0,
+                sequence_score=0.0,
+                embedding_score=0.0,
+                match_percent=0,
+                pricing_enabled=False,
+                budget_fit=True,
+                religion_match=True,
+                lifestyle_match=False,
+                reason="Hidden because you previously marked this place as not for you.",
+            )
+
+        per_place_dismiss_penalty = 0.0
+        if dismissed_ids and candidate.place_id in dismissed_ids:
+            # Strong penalty — the user already swiped this exact place away.
+            # Not a hard block (a dismiss is softer than a dislike) but enough
+            # to push the place below organically-ranked alternatives.
+            per_place_dismiss_penalty = -0.45
 
         # ── 1. Bandit score ─────────────────────────────────────────────────
         bandit  = get_bandit()
@@ -612,6 +709,20 @@ def _score_candidate(
         )
         ai = max(0.0, ai + schedule_adj)
 
+        # ── 10b. v18: Location preference (indoor/outdoor) ──────────────────
+        loc_adj = _location_preference_score(ptype, context.location_preference or "")
+        ai = max(0.0, min(1.0, ai + loc_adj))
+
+        # ── 10c. v18: Daily routine alignment ───────────────────────────────
+        # If the user said they go to the gym every morning and we're scoring a
+        # gym in the morning time slot, give it an explicit boost.
+        routine_adj = _daily_routine_score(
+            ptype,
+            context.time_of_day or "morning",
+            context.daily_routine or {},
+        )
+        ai = min(1.0, ai + routine_adj)
+
         # ── 11. Weekend preference boost ────────────────────────────────────
         wp = (context.weekend_preference or "").lower()
         if wp == "outdoor" and ptype in ("outdoor", "hiking", "park", "sports"):
@@ -628,6 +739,14 @@ def _score_candidate(
         # ── 12. RAG quality bump ────────────────────────────────────────────
         rag = rag_score(place_dict)
         ai  = min(1.0, ai + 0.02 * rag.get("quality_score", 0.0))
+
+        # ── 12b. v18: Apply per-place negative / positive memory ────────────
+        # Dismiss penalty — strong push below organic candidates.
+        if per_place_dismiss_penalty != 0.0:
+            ai = max(0.0, ai + per_place_dismiss_penalty)
+        # Save boost — user explicitly saved this place, surface it.
+        if saved_ids and candidate.place_id in saved_ids:
+            ai = min(1.0, ai + 0.10)
 
         ai = round(max(0.0, min(1.0, ai)), 4)
 
@@ -767,10 +886,23 @@ def predict(req: PredictRequest) -> PredictResponse:
         learned_top_categories = learned_top,
     )
 
+    # ── v18: Per-place negative / positive memory sets ───────────────────────
+    # Built once per request so each candidate can do O(1) lookup.
+    hard_block_ids: set[str] = set()
+    if ctx.disliked_place_ids:
+        hard_block_ids.update(ctx.disliked_place_ids)
+    if ctx.not_interested_place_ids:
+        hard_block_ids.update(ctx.not_interested_place_ids)
+    dismissed_ids: set[str] = set(ctx.dismissed_place_ids or [])
+    saved_ids:     set[str] = set(ctx.saved_place_ids or [])
+
     results = [
         _score_candidate(
             req.user_id, cand, ctx, seq_dist, interaction_types, user_budget_tier,
-            user_persona = user_persona,
+            user_persona   = user_persona,
+            hard_block_ids = hard_block_ids,
+            dismissed_ids  = dismissed_ids,
+            saved_ids      = saved_ids,
         )
         for cand in req.candidates
     ]

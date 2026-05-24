@@ -51,14 +51,21 @@ function preloadScheduleImages(schedule) {
         const urls = [];
         for (const slots of Object.values(schedule ?? {})) {
             for (const slot of (slots ?? [])) {
-                const img = slot?.place?.images?.[0] ?? slot?.place?.image;
-                if (typeof img === "string" && img.startsWith("http")) {
-                    urls.push(img);
+                const picks = Array.isArray(slot?.places) && slot.places.length > 0
+                    ? slot.places
+                    : (slot?.place ? [slot.place] : []);
+                for (const place of picks) {
+                    const img = place?.images?.[0] ?? place?.image;
+                    if (typeof img === "string" && img.startsWith("http")) {
+                        urls.push(img);
+                    }
                 }
             }
         }
-        // Prefetch up to 6 images without blocking
-        urls.slice(0, 6).forEach(url => Image.prefetch(url).catch(() => null));
+        // Prefetch up to 10 images without blocking
+        Array.from(new Set(urls)).slice(0, 10).forEach((url) =>
+            Image.prefetch(url).catch(() => null),
+        );
     } catch {
         // non-fatal
     }
@@ -196,10 +203,77 @@ function PeriodHeader({ period, isCurrent, styles, palette }) {
     );
 }
 
+function PlacePickRow({ place, onPress, palette, styles }) {
+    const hasPricing = place?.pricingEnabled && (
+        place.estimatedCost ?? place.priceLevel != null
+    );
+    const matchPct = typeof place?.matchPercent === "number"
+        ? Math.round(place.matchPercent)
+        : null;
+    const imageUri = place?.images?.[0] ?? place?.image ?? null;
+
+    return (
+        <Pressable
+            onPress={onPress}
+            style={({ pressed }) => [
+                styles.placePickRow,
+                pressed && { opacity: 0.85 },
+            ]}
+        >
+            <View style={styles.placePickThumb}>
+                {imageUri ? (
+                    <Image
+                        source={{ uri: imageUri }}
+                        style={styles.placePickImage}
+                        resizeMode="cover"
+                    />
+                ) : (
+                    <Ionicons
+                        name="image-outline"
+                        size={18}
+                        color={palette.textMuted}
+                    />
+                )}
+            </View>
+            <View style={styles.placePickBody}>
+                <Text style={styles.placePickName} numberOfLines={1}>
+                    {place?.name ?? "Recommended"}
+                </Text>
+                <View style={styles.placePickMetaRow}>
+                    <Ionicons
+                        name="location-outline"
+                        size={11}
+                        color={palette.textMuted}
+                    />
+                    <Text style={styles.placePickMeta} numberOfLines={1}>
+                        {place?.distance ?? "Nearby"}
+                    </Text>
+                    {hasPricing ? (
+                        <Text style={styles.placePickPrice}>
+                            {place?.estimatedCost
+                                ? `~${place.estimatedCost}`
+                                : priceLevelDots(place?.priceLevel)}
+                        </Text>
+                    ) : null}
+                    {matchPct != null ? (
+                        <Text style={styles.placePickMatch}>{matchPct}%</Text>
+                    ) : null}
+                </View>
+            </View>
+            <Ionicons
+                name="chevron-forward"
+                size={14}
+                color={palette.textMuted}
+            />
+        </Pressable>
+    );
+}
+
 function ActivityCard({
     slot,
     onPress,
     onPlacePress,
+    onComplete,
     isDark,
     palette,
     styles,
@@ -212,10 +286,12 @@ function ActivityCard({
         }).start();
     }, [fadeAnim]);
 
-    const place = slot.place;
-    const hasPricing = place?.pricingEnabled && (
-        place.estimatedCost ?? place.priceLevel != null
-    );
+    const picks = Array.isArray(slot.places) && slot.places.length > 0
+        ? slot.places
+        : (slot.place ? [slot.place] : []);
+    const confidencePct = typeof slot.confidence === "number"
+        ? Math.round(slot.confidence * 100)
+        : null;
 
     return (
         <Animated.View style={{ opacity: fadeAnim }}>
@@ -247,6 +323,17 @@ function ActivityCard({
                             <View style={styles.aiPickPill}>
                                 <Text style={styles.aiPickPillText}>AI Pick</Text>
                             </View>
+                        ) : confidencePct != null && confidencePct >= 70 ? (
+                            <View style={styles.confidencePill}>
+                                <Ionicons
+                                    name="trending-up"
+                                    size={9}
+                                    color="#0D9488"
+                                />
+                                <Text style={styles.confidencePillText}>
+                                    {confidencePct}% fit
+                                </Text>
+                            </View>
                         ) : (
                             <Ionicons
                                 name="chevron-forward"
@@ -264,40 +351,6 @@ function ActivityCard({
                         <Text style={styles.activityDuration}>{slot.duration}</Text>
                     </View>
 
-                    {/* Place info (if available) */}
-                    {place ? (
-                        <Pressable
-                            onPress={onPlacePress}
-                            style={({ pressed }) => [
-                                styles.placeChip,
-                                pressed && { opacity: 0.8 },
-                            ]}
-                        >
-                            <Ionicons
-                                name="location-outline"
-                                size={12}
-                                color={palette.oceanBlue}
-                            />
-                            <Text style={styles.placeChipName} numberOfLines={1}>
-                                {place.name}
-                            </Text>
-                            <Text style={styles.placeChipDistance}>
-                                {place.distance}
-                            </Text>
-                            {hasPricing && (
-                                <Text style={styles.placeChipPrice}>
-                                    {place.estimatedCost
-                                        ? `~${place.estimatedCost}`
-                                        : priceLevelDots(place.priceLevel)}
-                                </Text>
-                            )}
-                        </Pressable>
-                    ) : (
-                        <Text style={styles.activityHint}>
-                            Tap for places &amp; ideas
-                        </Text>
-                    )}
-
                     {/* AI reason */}
                     {slot.reason ? (
                         <Text style={styles.activityReason} numberOfLines={2}>
@@ -313,9 +366,67 @@ function ActivityCard({
                             ))}
                         </View>
                     )}
+
+                    {/* Place picks (up to 3) */}
+                    {picks.length > 0 ? (
+                        <View style={styles.placePickList}>
+                            {picks.slice(0, 3).map((p, idx) => (
+                                <PlacePickRow
+                                    key={p.placeId ?? p.id ?? `${slot.id}-${idx}`}
+                                    place={p}
+                                    palette={palette}
+                                    styles={styles}
+                                    onPress={() => onPlacePress(p)}
+                                />
+                            ))}
+                        </View>
+                    ) : (
+                        <Text style={styles.activityHint}>
+                            Tap for places &amp; ideas
+                        </Text>
+                    )}
+
+                    {/* Completion CTA */}
+                    {typeof onComplete === "function" ? (
+                        <Pressable
+                            onPress={onComplete}
+                            hitSlop={8}
+                            style={({ pressed }) => [
+                                styles.completeCta,
+                                pressed && { opacity: 0.85 },
+                            ]}
+                        >
+                            <Ionicons
+                                name="checkmark-circle-outline"
+                                size={14}
+                                color={palette.emerald}
+                            />
+                            <Text style={styles.completeCtaText}>
+                                Mark as done
+                            </Text>
+                        </Pressable>
+                    ) : null}
                 </View>
             </Pressable>
         </Animated.View>
+    );
+}
+
+function PlannerSkeleton({ styles, palette }) {
+    return (
+        <View>
+            {[0, 1, 2].map((i) => (
+                <View key={i} style={[styles.activityCard, styles.skeletonCard]}>
+                    <View style={[styles.activityIconWrap, styles.skeletonBlock]} />
+                    <View style={styles.activityContent}>
+                        <View style={[styles.skeletonBar, { width: "55%", height: 14 }]} />
+                        <View style={[styles.skeletonBar, { width: "35%", height: 10, marginTop: 8 }]} />
+                        <View style={[styles.skeletonBar, { width: "85%", height: 10, marginTop: 10 }]} />
+                        <View style={[styles.skeletonBar, { width: "70%", height: 10, marginTop: 6 }]} />
+                    </View>
+                </View>
+            ))}
+        </View>
     );
 }
 
@@ -373,7 +484,8 @@ export default function RoutineScreen() {
 
     // ── Data loading ─────────────────────────────────────────────────────────
 
-    const fetchAll = useCallback(async () => {
+    const fetchAll = useCallback(async (opts = {}) => {
+        const { forceRefresh = false } = opts;
         try {
             setLoading(true);
             setError("");
@@ -409,12 +521,11 @@ export default function RoutineScreen() {
 
             // Fetch AI schedule (non-blocking — show local schedule while loading)
             setAiLoading(true);
-            getAiSchedule(loc)
+            getAiSchedule({ ...loc, refresh: forceRefresh ? true : undefined })
                 .then((resp) => {
                     if (resp?.success && resp?.data) {
                         setAiSchedule(resp.data);
                         setAiMeta(resp.meta ?? null);
-                        // Preload top place images for fast detail open
                         preloadScheduleImages(resp.data);
                     }
                 })
@@ -539,10 +650,33 @@ export default function RoutineScreen() {
             setRefreshing(true);
             setAiSchedule(null);
             setAiMeta(null);
-            await fetchAll();
+            await fetchAll({ forceRefresh: true });
         } finally {
             setRefreshing(false);
         }
+    }
+
+    function handleActivityComplete(slot) {
+        const pid = slot.place?.placeId
+            ?? slot.places?.[0]?.placeId
+            ?? `activity-${slot.activityType}-${slot.period}`;
+        createInteraction({
+            placeId:    pid,
+            actionType: INTERACTION_TYPES.ACTIVITY_COMPLETE,
+            metadata: {
+                source:       "ai_schedule_complete",
+                activityType: slot.activityType,
+                period:       slot.period,
+                timeOfDay:    slot.time,
+                slotSource:   slot.source,
+                routineId:    slot.routineId ?? null,
+            },
+        }).catch(() => null);
+        Alert.alert(
+            "Nice work!",
+            "Logged — the planner will use this to learn what fits your day.",
+            [{ text: "OK" }],
+        );
     }
 
     // ── Picker sheet ─────────────────────────────────────────────────────────
@@ -726,18 +860,21 @@ export default function RoutineScreen() {
                             styles={styles}
                         />
 
-                        {/* Loading AI overlay for first-time */}
+                        {/* Loading AI banner + skeleton for first-time */}
                         {aiLoading && !aiSchedule && (
-                            <View style={styles.aiLoadingRow}>
-                                <Ionicons
-                                    name="sparkles"
-                                    size={14}
-                                    color={palette.oceanBlue}
-                                />
-                                <Text style={styles.aiLoadingText}>
-                                    AI is personalizing your day…
-                                </Text>
-                            </View>
+                            <>
+                                <View style={styles.aiLoadingRow}>
+                                    <Ionicons
+                                        name="sparkles"
+                                        size={14}
+                                        color={palette.oceanBlue}
+                                    />
+                                    <Text style={styles.aiLoadingText}>
+                                        AI is personalizing your day…
+                                    </Text>
+                                </View>
+                                <PlannerSkeleton styles={styles} palette={palette} />
+                            </>
                         )}
 
                         {/* Period sections */}
@@ -770,9 +907,10 @@ export default function RoutineScreen() {
                                                 palette={palette}
                                                 styles={styles}
                                                 onPress={() => {
-                                                    // Track interaction for AI learning
                                                     createInteraction({
-                                                        placeId:    slot.place?.placeId ?? `activity-${slot.activityType}`,
+                                                        placeId:    slot.place?.placeId
+                                                            ?? slot.places?.[0]?.placeId
+                                                            ?? `activity-${slot.activityType}`,
                                                         actionType: INTERACTION_TYPES.CLICK,
                                                         metadata: {
                                                             source:       "ai_schedule_tab",
@@ -783,6 +921,8 @@ export default function RoutineScreen() {
                                                             routineId:    slot.routineId ?? null,
                                                             hourOfDay:    new Date().getHours(),
                                                             dayOfWeek:    new Date().getDay(),
+                                                            placesCount:  slot.places?.length ?? 0,
+                                                            confidence:   slot.confidence ?? null,
                                                         },
                                                     }).catch(() => null);
                                                     navigateToActivityPicks({
@@ -793,9 +933,8 @@ export default function RoutineScreen() {
                                                         budgetRange:        slot.budgetRange ?? "medium",
                                                     });
                                                 }}
-                                                onPlacePress={() =>
-                                                    slot.place ? openPlaceDetail(slot.place) : null
-                                                }
+                                                onPlacePress={(place) => place && openPlaceDetail(place)}
+                                                onComplete={() => handleActivityComplete(slot)}
                                             />
                                         ))}
                                     </View>
@@ -1214,6 +1353,116 @@ function createStyles(palette, isDark) {
         },
         badgesRow: {
             flexDirection: "row", flexWrap: "wrap", gap: 5, marginTop: 7,
+        },
+
+        // ── Place pick rows (multi-place per activity) ──────────────────────
+        placePickList: {
+            marginTop: 10,
+            gap: 6,
+        },
+        placePickRow: {
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 10,
+            paddingHorizontal: 10,
+            paddingVertical: 8,
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: `${palette.oceanBlue}25`,
+            backgroundColor: isDark ? "rgba(38,154,227,0.08)" : "rgba(56,174,255,0.06)",
+        },
+        placePickThumb: {
+            width: 38,
+            height: 38,
+            borderRadius: 10,
+            backgroundColor: isDark ? "rgba(18,35,58,0.7)" : "rgba(230,242,251,0.9)",
+            alignItems: "center",
+            justifyContent: "center",
+            overflow: "hidden",
+        },
+        placePickImage: {
+            width: "100%",
+            height: "100%",
+            borderRadius: 10,
+        },
+        placePickBody: { flex: 1, minWidth: 0 },
+        placePickName: {
+            color: palette.textPrimary,
+            fontSize: 13,
+            fontWeight: "700",
+        },
+        placePickMetaRow: {
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            marginTop: 2,
+            flexWrap: "wrap",
+        },
+        placePickMeta: {
+            color: palette.textMuted,
+            fontSize: 11,
+        },
+        placePickPrice: {
+            color: palette.emerald,
+            fontSize: 11,
+            fontWeight: "700",
+            marginLeft: 4,
+        },
+        placePickMatch: {
+            color: palette.oceanBlue,
+            fontSize: 11,
+            fontWeight: "800",
+            marginLeft: "auto",
+        },
+
+        // ── Activity confidence + completion CTA ─────────────────────────────
+        confidencePill: {
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 3,
+            paddingHorizontal: 7,
+            paddingVertical: 2,
+            borderRadius: 999,
+            backgroundColor: "rgba(20,184,166,0.12)",
+            borderWidth: 1,
+            borderColor: "rgba(20,184,166,0.35)",
+        },
+        confidencePillText: {
+            color: "#0D9488",
+            fontSize: 10,
+            fontWeight: "800",
+            letterSpacing: 0.3,
+        },
+        completeCta: {
+            marginTop: 10,
+            alignSelf: "flex-start",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            paddingHorizontal: 10,
+            paddingVertical: 5,
+            borderRadius: 999,
+            borderWidth: 1,
+            borderColor: `${palette.emerald}55`,
+            backgroundColor: isDark ? "rgba(16,185,129,0.12)" : "rgba(16,185,129,0.10)",
+        },
+        completeCtaText: {
+            color: palette.emerald,
+            fontSize: 11,
+            fontWeight: "800",
+            letterSpacing: 0.3,
+        },
+
+        // ── Skeleton ─────────────────────────────────────────────────────────
+        skeletonCard: {
+            opacity: 0.7,
+        },
+        skeletonBlock: {
+            backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(15,30,55,0.07)",
+        },
+        skeletonBar: {
+            borderRadius: 6,
+            backgroundColor: isDark ? "rgba(255,255,255,0.07)" : "rgba(15,30,55,0.08)",
         },
 
         // ── Planner cards ─────────────────────────────────────────────────────

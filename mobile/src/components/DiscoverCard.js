@@ -22,9 +22,11 @@ function DiscoverCard({
     onPressIn,
     onLike,
     onSave,
+    onDislike,
     onDismiss,
     liked = false,
     saved = false,
+    disliked = false,
 }) {
     const { palette, gradients, isDark } = useAppTheme();
     const styles = useMemo(
@@ -276,6 +278,7 @@ function DiscoverCard({
 
                             {(typeof onLike === "function" ||
                                 typeof onSave === "function" ||
+                                typeof onDislike === "function" ||
                                 typeof onDismiss === "function") && (
                                 <View style={styles.feedActions}>
                                     {typeof onLike === "function" ? (
@@ -310,6 +313,23 @@ function DiscoverCard({
                                             />
                                         </Pressable>
                                     ) : null}
+                                    {typeof onDislike === "function" ? (
+                                        <Pressable
+                                            onPress={onDislike}
+                                            hitSlop={8}
+                                            style={[
+                                                styles.feedActionBtn,
+                                                disliked && styles.feedActionBtnDisliked,
+                                            ]}
+                                            accessibilityLabel="Don't show this kind of place"
+                                        >
+                                            <Ionicons
+                                                name={disliked ? "thumbs-down" : "thumbs-down-outline"}
+                                                size={15}
+                                                color={disliked ? "#B91C1C" : palette.textSecondary}
+                                            />
+                                        </Pressable>
+                                    ) : null}
                                     {typeof onDismiss === "function" ? (
                                         <Pressable
                                             onPress={onDismiss}
@@ -318,6 +338,7 @@ function DiscoverCard({
                                                 styles.feedActionBtn,
                                                 styles.feedActionBtnMuted,
                                             ]}
+                                            accessibilityLabel="Hide this recommendation"
                                         >
                                             <Ionicons
                                                 name="close"
@@ -544,6 +565,12 @@ function createStyles(palette, isDark) {
                 ? "rgba(15,124,199,0.18)"
                 : "rgba(219,242,255,0.95)",
             borderColor: "rgba(15,124,199,0.40)",
+        },
+        feedActionBtnDisliked: {
+            backgroundColor: isDark
+                ? "rgba(185,28,28,0.18)"
+                : "rgba(254,226,226,0.95)",
+            borderColor: "rgba(185,28,28,0.40)",
         },
     });
 }

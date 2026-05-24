@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { Alert } from "react-native";
 import { createInteraction, getInteractions } from "../api/interactionApi";
+import { getSavedPlaces } from "../api/placeApi";
 import { INTERACTION_TYPES } from "../utils/constants";
 import { getApiErrorMessage, unwrapApiData } from "../utils/api";
 import { enrichPlaceLocation } from "../utils/placeLocation";
@@ -41,23 +42,57 @@ export function useSavedPlaces() {
             }
             setError("");
 
+            // v18: prefer the dedicated /places/saved endpoint, which returns
+            // enriched, sorted, server-authoritative results. Fall back to
+            // interaction replay only when the endpoint is unavailable (older
+            // backend) so the screen never goes blank during a rolling deploy.
+            const fromServer = await getSavedPlaces();
+            if (Array.isArray(fromServer)) {
+                const enriched = fromServer.map((p, idx) =>
+                    enrichPlaceLocation(
+                        {
+                            id:          p.id ?? p.placeId,
+                            placeId:     p.placeId ?? p.id,
+                            name:        p.name ?? "Saved place",
+                            type:        p.type ?? "Place",
+                            score:       p.score ?? "Saved",
+                            distance:    p.distance ?? "Nearby",
+                            description: p.description ?? "Saved from your recommendation history.",
+                            ...p,
+                        },
+                        idx,
+                    ),
+                );
+                setSaved(enriched);
+                return;
+            }
+
             const envelope = await getInteractions();
             const interactions = unwrapApiData(envelope, []);
             const ordered = Array.isArray(interactions) ? interactions : [];
             const savedByPlace = new Map();
 
+            // Fallback: replay every interaction that changes saved-ness so
+            // the list matches the same source-of-truth rules used in the
+            // interaction store.
             ordered.forEach((interaction, index) => {
                 const pid = interaction?.placeId;
                 if (!pid) {
                     return;
                 }
 
-                if (interaction?.actionType === INTERACTION_TYPES.SAVE) {
-                    savedByPlace.set(pid, asSavedPlace(interaction, index));
-                }
-
-                if (interaction?.actionType === INTERACTION_TYPES.DISMISS) {
-                    savedByPlace.delete(pid);
+                switch (interaction?.actionType) {
+                    case INTERACTION_TYPES.SAVE:
+                        savedByPlace.set(pid, asSavedPlace(interaction, index));
+                        break;
+                    case INTERACTION_TYPES.REMOVE_SAVE:
+                    case INTERACTION_TYPES.DISMISS:
+                    case INTERACTION_TYPES.DISLIKE:
+                    case INTERACTION_TYPES.NOT_INTERESTED:
+                        savedByPlace.delete(pid);
+                        break;
+                    default:
+                        break;
                 }
             });
 
@@ -83,9 +118,13 @@ export function useSavedPlaces() {
     const handleDismiss = useCallback(async (place, opts = {}) => {
         const source = opts.source ?? "profile_saved_places";
         try {
+            // v18: removing from the Saved tab is semantically a REMOVE_SAVE
+            // (not a DISMISS). Using DISMISS here doubled as a soft "stop
+            // showing me" signal, which is too aggressive — the user might
+            // still want this place to surface elsewhere.
             await createInteraction({
                 placeId: place.placeId,
-                actionType: INTERACTION_TYPES.DISMISS,
+                actionType: INTERACTION_TYPES.REMOVE_SAVE,
                 metadata: {
                     source,
                     place,

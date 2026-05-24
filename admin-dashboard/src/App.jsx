@@ -15,6 +15,8 @@ import PlacesAdminPage from "@/features/places/PlacesAdminPage";
 import AnalyticsHubPage from "@/features/analytics/AnalyticsHubPage";
 import ModerationPage from "@/features/moderation/ModerationPage";
 import NotificationsAdminPage from "@/features/notifications/NotificationsAdminPage";
+import RecommendationControlPage from "@/features/recommendationControl/RecommendationControlPage";
+import TrendingManagementPage from "@/features/trending/TrendingManagementPage";
 
 export default function App() {
   return (
@@ -35,6 +37,8 @@ export default function App() {
           <Route path="/notifications" element={<NotificationsAdminPage />} />
           <Route path="/system" element={<SystemPage />} />
           <Route path="/dev-tools" element={<DevToolsPage />} />
+          <Route path="/recommendation-control" element={<RecommendationControlPage />} />
+          <Route path="/trending-management" element={<TrendingManagementPage />} />
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
