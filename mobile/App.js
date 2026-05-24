@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import { ThemeProvider, useAppTheme } from "./src/context/ThemeContext";
 import { NotificationProvider } from "./src/context/NotificationContext";
 import { InteractionStateProvider } from "./src/context/InteractionStateContext";
+import { SavedPlacesProvider } from "./src/context/SavedPlacesContext";
 import AppNavigator from "./src/navigation/AppNavigator";
 import { THEMES } from "./src/theme/theme";
 
@@ -36,6 +37,7 @@ const linking = {
             },
             SavedPlaces: "saved",
             Trending: "trending",
+            Chat: "chat",
             NotificationSettings: "notification-settings",
             Reminders: "reminders",
             ReminderEditor: "reminder-editor",
@@ -48,9 +50,11 @@ function InnerApp() {
 
     return (
         <InteractionStateProvider>
-            <NotificationProvider profile={profile}>
-                <AppNavigator />
-            </NotificationProvider>
+            <SavedPlacesProvider>
+                <NotificationProvider profile={profile}>
+                    <AppNavigator />
+                </NotificationProvider>
+            </SavedPlacesProvider>
         </InteractionStateProvider>
     );
 }

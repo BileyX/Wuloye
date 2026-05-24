@@ -24,6 +24,7 @@ function PlaceCard({
     liked = false,
     saved = false,
     disliked = false,
+    animateEntrance = true,
 }) {
     const hasActions =
         typeof onLike === "function" ||
@@ -37,12 +38,16 @@ function PlaceCard({
     const entrance = useRef(new Animated.Value(0)).current;
 
     useEffect(() => {
+        if (!animateEntrance) {
+            entrance.setValue(1);
+            return undefined;
+        }
         Animated.timing(entrance, {
             toValue: 1,
             duration: 320,
             useNativeDriver: true,
         }).start();
-    }, [entrance]);
+    }, [entrance, animateEntrance]);
 
     const animatedStyle = {
         opacity: entrance,
@@ -375,6 +380,8 @@ function placeCardPropsEqual(prev, next) {
         prev.saved === next.saved &&
         prev.disliked === next.disliked &&
         prev.onPress === next.onPress &&
+        prev.onPressIn === next.onPressIn &&
+        prev.animateEntrance === next.animateEntrance &&
         prev.onLike === next.onLike &&
         prev.onSave === next.onSave &&
         prev.onDislike === next.onDislike &&

@@ -23,6 +23,7 @@ import { useNavigation } from "@react-navigation/native";
 import {
     requestNotificationPermissions,
     getStoredPermissionStatus,
+    syncPermissionStatusFromOS,
     loadPreferences,
     savePreferences,
     generateNotificationContent,
@@ -40,6 +41,9 @@ import {
     markInboxNotificationRead,
     markAllInboxNotificationsRead,
     normalizeNavigateTarget,
+    registerExpoPushToken,
+    unregisterExpoPushToken,
+    subscribePushTokenRefresh,
 } from "../services/notificationService";
 import { syncReminderNotificationsWithServer } from "../api/reminderApi";
 
@@ -62,6 +66,8 @@ export function NotificationProvider({ children, profile }) {
     const [isInitialized, setIsInitialized] = useState(false);
     /** In-app notification center (badge + list). */
     const [inbox, setInbox] = useState([]);
+    /** Pending deep-link navigation (state triggers NavConsumer). */
+    const [pendingNav, setPendingNav] = useState(null);
 
     const inboxUnreadCount = useMemo(
         () => countUnreadInbox(inbox),
@@ -71,6 +77,7 @@ export function NotificationProvider({ children, profile }) {
     const navigationRef = useRef(null);
     const responseListenerRef = useRef(null);
     const foregroundListenerRef = useRef(null);
+    const pushTokenListenerRef = useRef(null);
     const schedulingRef = useRef(false);
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
@@ -82,8 +89,10 @@ export function NotificationProvider({ children, profile }) {
             // removeNotificationSubscription was removed from the public API.
             responseListenerRef.current?.remove?.();
             foregroundListenerRef.current?.remove?.();
+            pushTokenListenerRef.current?.();
             responseListenerRef.current = null;
             foregroundListenerRef.current = null;
+            pushTokenListenerRef.current = null;
         };
     }, []);
 
@@ -121,6 +130,31 @@ export function NotificationProvider({ children, profile }) {
         syncReminderNotificationsWithServer().catch(() => null);
     }, [isInitialized, permissionStatus, profile?.uid]);
 
+    // Register Expo push token when authenticated + permission granted.
+    useEffect(() => {
+        if (!isInitialized || permissionStatus !== "granted" || !profile?.uid) {
+            return;
+        }
+
+        registerExpoPushToken().catch(() => null);
+
+        pushTokenListenerRef.current = subscribePushTokenRefresh(() => {
+            registerExpoPushToken().catch(() => null);
+        });
+
+        return () => {
+            pushTokenListenerRef.current?.();
+            pushTokenListenerRef.current = null;
+        };
+    }, [isInitialized, permissionStatus, profile?.uid]);
+
+    // Deactivate push token on logout.
+    useEffect(() => {
+        if (isInitialized && !profile?.uid) {
+            unregisterExpoPushToken().catch(() => null);
+        }
+    }, [isInitialized, profile?.uid]);
+
     async function bootstrap() {
         await setupAndroidChannels();
 
@@ -128,12 +162,12 @@ export function NotificationProvider({ children, profile }) {
         const prefs = await loadPreferences(profile);
         setPreferences(prefs);
 
-        // Check permission status
-        const stored = await getStoredPermissionStatus();
-        setPermissionStatus(stored);
+        // Check permission status (always sync from OS — cache can be stale)
+        const osStatus = await syncPermissionStatusFromOS();
+        setPermissionStatus(osStatus);
 
         // Decide whether to show the permission explanation screen
-        if (!stored || stored === "undetermined") {
+        if (!osStatus || osStatus === "undetermined") {
             const alreadyShown = await hasShownPermissionScreen();
             if (!alreadyShown) {
                 setShowPermissionScreen(true);
@@ -144,12 +178,12 @@ export function NotificationProvider({ children, profile }) {
         setupListeners();
 
         // Handle any notification that was tapped while app was closed
-        handleInitialNotificationResponse();
+        await handleInitialNotificationResponse();
 
         setIsInitialized(true);
 
         // Schedule daily notifications if permission is already granted
-        if (stored === "granted" && prefs.enabled) {
+        if (osStatus === "granted" && prefs.enabled) {
             await refreshDailySchedule(prefs);
         }
     }
@@ -213,11 +247,12 @@ export function NotificationProvider({ children, profile }) {
     function navigateTo(target) {
         if (!target?.screen) return;
         const normalized = normalizeNavigateTarget(target) ?? target;
-        pendingNavRef.current = normalized;
+        setPendingNav(normalized);
     }
 
-    // Ref so the NavConsumer component can fire pending nav
-    const pendingNavRef = useRef(null);
+    const clearPendingNav = useCallback(() => {
+        setPendingNav(null);
+    }, []);
 
     // ── Permission flow ───────────────────────────────────────────────────────
 
@@ -230,6 +265,7 @@ export function NotificationProvider({ children, profile }) {
             const prefs = await loadPreferences(profile);
             setPreferences(prefs);
             await refreshDailySchedule(prefs);
+            await registerExpoPushToken();
         }
 
         return status;
@@ -319,7 +355,6 @@ export function NotificationProvider({ children, profile }) {
         preferences,
         showPermissionScreen,
         isInitialized,
-        pendingNavRef,
         requestPermissions,
         dismissPermissionScreen,
         updatePreferences,
@@ -336,7 +371,7 @@ export function NotificationProvider({ children, profile }) {
         <NotificationContext.Provider value={value}>
             {children}
             {/* NavConsumer fires pending navigations after mount */}
-            <NavConsumer pendingNavRef={pendingNavRef} />
+            <NavConsumer pendingNav={pendingNav} onConsumed={clearPendingNav} />
         </NotificationContext.Provider>
     );
 }
@@ -346,17 +381,12 @@ export function NotificationProvider({ children, profile }) {
  * any pending deep-link navigation queued before navigation was ready.
  * Must be rendered inside NavigationContainer (guaranteed by App.js layout).
  */
-function NavConsumer({ pendingNavRef }) {
-    // useNavigation() is safe here because NotificationProvider is rendered
-    // inside NavigationContainer (see App.js InnerApp component).
+function NavConsumer({ pendingNav, onConsumed }) {
     const navigation = useNavigation();
 
     useEffect(() => {
-        const pending = pendingNavRef.current;
-        if (!pending) return;
-        pendingNavRef.current = null;
+        if (!pendingNav) return;
 
-        // Delay allows the navigator to fully mount before navigating
         const timer = setTimeout(() => {
             try {
                 const TAB_SCREENS = [
@@ -367,7 +397,7 @@ function NavConsumer({ pendingNavRef }) {
                     "Profile",
                 ];
                 const normalized =
-                    normalizeNavigateTarget(pending) ?? pending;
+                    normalizeNavigateTarget(pendingNav) ?? pendingNav;
                 if (TAB_SCREENS.includes(normalized.screen)) {
                     navigation.navigate("MainTabs", {
                         screen: normalized.screen,
@@ -381,11 +411,13 @@ function NavConsumer({ pendingNavRef }) {
                 }
             } catch (e) {
                 console.warn("[Notifications] Navigation from notification failed:", e.message);
+            } finally {
+                onConsumed?.();
             }
         }, 350);
 
         return () => clearTimeout(timer);
-    }, []);
+    }, [pendingNav, navigation, onConsumed]);
 
     return null;
 }

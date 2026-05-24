@@ -85,7 +85,7 @@ export const fetchPlaceDetails = getPlaceDetails;
  */
 export async function getSavedPlaces() {
     try {
-        const { data } = await apiClient.get("/places/saved", { timeout: 20_000 });
+        const { data } = await apiClient.get("/places/saved", { timeout: 12_000 });
         const items = unwrapApiData(data, []);
         return Array.isArray(items) ? items : [];
     } catch (err) {

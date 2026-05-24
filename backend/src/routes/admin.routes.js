@@ -31,6 +31,8 @@ import {
   getPersonalizedTrendingFeed,
   invalidateTrendingCache,
 } from "../services/trending.service.js";
+import { sendAdminPushBroadcast } from "../services/pushNotification.service.js";
+import { countActiveDevices } from "../services/pushToken.service.js";
 
 const router = Router();
 
@@ -435,27 +437,77 @@ router.get("/ai/insights", async (req, res, next) => {
 
 /**
  * POST /api/admin/notifications
- * Logs a notification record (FCM sending would be wired here).
- * Body: { title, message, type }
+ * Broadcast push notification to registered devices + persist record.
+ * Body: { title, message, type, deepLink?, subtitle?, imageUrl?, targeting? }
  */
 router.post("/notifications", async (req, res, next) => {
   try {
-    const { title, message, type = "announcement" } = req.body;
-    if (!title || !message) {
+    const {
+      title,
+      message,
+      body,
+      type,
+      severity,
+      deepLink = "wuloye://home",
+      subtitle = "",
+      imageUrl = null,
+      targeting = null,
+    } = req.body;
+
+    const msgBody = message || body;
+    const notifType = type || severity || "announcement";
+
+    if (!title || !msgBody) {
       return res.status(400).json({ success: false, message: "title and message are required" });
     }
+
     const docRef = db.collection("admin_notifications").doc();
     const doc = {
       id: docRef.id,
       title,
-      message,
-      type,
+      message: msgBody,
+      type: notifType,
+      deepLink,
+      subtitle: subtitle || null,
+      imageUrl: imageUrl || null,
+      targeting: targeting || null,
       sentBy: req.user.email ?? req.user.uid,
       sentAt: new Date().toISOString(),
+      pushStats: null,
     };
     await docRef.set(doc);
-    logger.info(`[admin] Notification sent: "${title}" by ${doc.sentBy}`);
-    return res.status(201).json({ success: true, data: doc });
+
+    const pushStats = await sendAdminPushBroadcast({
+      title,
+      body: msgBody,
+      type: notifType,
+      deepLink,
+      subtitle,
+      imageUrl,
+      notificationId: docRef.id,
+      targeting,
+    });
+
+    await docRef.update({ pushStats });
+
+    logger.info(
+      `[admin] Push broadcast "${title}" by ${doc.sentBy} — sent=${pushStats.sent} failed=${pushStats.failed} devices=${pushStats.targetedDevices}`,
+    );
+
+    return res.status(201).json({ success: true, data: { ...doc, pushStats } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/admin/notifications/stats
+ * Active registered device counts for admin dashboard.
+ */
+router.get("/notifications/stats", async (req, res, next) => {
+  try {
+    const stats = await countActiveDevices();
+    return res.status(200).json({ success: true, data: stats });
   } catch (err) {
     next(err);
   }

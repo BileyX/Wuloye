@@ -19,6 +19,7 @@ import NotificationPermissionScreen from "../screens/NotificationPermissionScree
 import NotificationSettingsScreen from "../screens/NotificationSettingsScreen";
 import RemindersScreen from "../screens/RemindersScreen";
 import ReminderEditorScreen from "../screens/ReminderEditorScreen";
+import ChatScreen from "../screens/ChatScreen";
 import MainTabs from "./MainTabs";
 import { useAppTheme } from "../context/ThemeContext";
 
@@ -286,6 +287,19 @@ export default function AppNavigator() {
                         default: "fade",
                     }),
                     gestureEnabled: true,
+                }}
+            />
+            <Stack.Screen
+                name="Chat"
+                component={ChatScreen}
+                options={{
+                    animation: Platform.select({
+                        ios: "slide_from_bottom",
+                        android: "slide_from_bottom",
+                        default: "fade",
+                    }),
+                    gestureEnabled: true,
+                    fullScreenGestureEnabled: true,
                 }}
             />
             {/* Keep Login in the stack so back-navigation works in edge cases */}

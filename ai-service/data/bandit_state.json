@@ -443,15 +443,15 @@
   },
   "CVLcFcyzxnO2SKlsLGOw9RneSJ93": {
     "gym": {
-      "alpha": 1.5,
+      "alpha": 11.0,
       "beta": 1.0
     },
     "yoga": {
-      "alpha": 1.0,
+      "alpha": 11.2,
       "beta": 1.0
     },
     "coffee": {
-      "alpha": 2.5,
+      "alpha": 10.5,
       "beta": 1.0
     },
     "cafe": {
@@ -459,27 +459,35 @@
       "beta": 1.0
     },
     "restaurant": {
-      "alpha": 1.0,
-      "beta": 1.0
+      "alpha": 3.2,
+      "beta": 4.0
     },
     "social": {
-      "alpha": 2.5,
+      "alpha": 4.5,
       "beta": 1.0
     },
     "outdoor": {
-      "alpha": 3.5,
+      "alpha": 4.0,
       "beta": 1.0
     },
     "park": {
-      "alpha": 2.0,
+      "alpha": 3.0,
       "beta": 1.0
     },
     "walk": {
-      "alpha": 2.5,
+      "alpha": 3.0,
       "beta": 1.0
     },
     "study": {
-      "alpha": 1.5,
+      "alpha": 2.0,
+      "beta": 1.0
+    },
+    "event": {
+      "alpha": 5.0,
+      "beta": 1.0
+    },
+    "hotel": {
+      "alpha": 5.5,
       "beta": 1.0
     }
   },
@@ -577,8 +585,8 @@
       "beta": 1.0
     },
     "coffee": {
-      "alpha": 53.2,
-      "beta": 7.0
+      "alpha": 67.10000000000001,
+      "beta": 12.0
     },
     "cafe": {
       "alpha": 1.0,
@@ -589,8 +597,8 @@
       "beta": 4.0
     },
     "social": {
-      "alpha": 46.2,
-      "beta": 10.0
+      "alpha": 60.60000000000001,
+      "beta": 10.8
     },
     "outdoor": {
       "alpha": 1.0,
@@ -601,7 +609,7 @@
       "beta": 4.0
     },
     "hotel": {
-      "alpha": 36.7,
+      "alpha": 44.900000000000006,
       "beta": 16.0
     },
     "sports": {
@@ -660,6 +668,48 @@
     },
     "event": {
       "alpha": 5.5,
+      "beta": 1.0
+    }
+  },
+  "bEGOBPzpygZfnbRGCM2eqNjEUfr1": {
+    "gym": {
+      "alpha": 13.399999999999999,
+      "beta": 2.5
+    },
+    "yoga": {
+      "alpha": 1.5,
+      "beta": 1.0
+    },
+    "coffee": {
+      "alpha": 7.5,
+      "beta": 1.0
+    },
+    "cafe": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "restaurant": {
+      "alpha": 7.6000000000000005,
+      "beta": 1.0
+    },
+    "social": {
+      "alpha": 18.099999999999998,
+      "beta": 4.0
+    },
+    "outdoor": {
+      "alpha": 1.0,
+      "beta": 1.0
+    },
+    "park": {
+      "alpha": 1.5,
+      "beta": 1.0
+    },
+    "study": {
+      "alpha": 1.5,
+      "beta": 4.0
+    },
+    "event": {
+      "alpha": 2.0,
       "beta": 1.0
     }
   }

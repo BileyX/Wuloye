@@ -19,6 +19,9 @@ import {
     generateContent,
     logInteraction,
     getHistory,
+    postDeviceToken,
+    deleteDeviceToken,
+    getDeviceStatus,
 } from "../controllers/notification.controller.js";
 
 const router = Router();
@@ -28,5 +31,8 @@ router.put("/preferences", authenticate, putPreferences);
 router.get("/generate", authenticate, generateContent);
 router.post("/interaction", authenticate, logInteraction);
 router.get("/history", authenticate, getHistory);
+router.post("/device-token", authenticate, postDeviceToken);
+router.delete("/device-token", authenticate, deleteDeviceToken);
+router.get("/device-status", authenticate, getDeviceStatus);
 
 export default router;

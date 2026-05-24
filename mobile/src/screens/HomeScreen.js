@@ -8,6 +8,7 @@ import PlaceCard from "../components/PlaceCard";
 import EmptyState from "../components/EmptyState";
 import PlaceListSkeleton from "../components/PlaceListSkeleton";
 import TopGreetingBanner from "../components/TopGreetingBanner";
+import FloatingChatButton from "../components/FloatingChatButton";
 import {
     createInteraction,
     createInteractionsBatch,
@@ -703,6 +704,7 @@ export default function HomeScreen({ navigation }) {
                     />
                 )}
             </LinearGradient>
+            <FloatingChatButton bottom={110} right={18} />
         </SafeAreaView>
     );
 }

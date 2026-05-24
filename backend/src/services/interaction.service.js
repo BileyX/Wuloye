@@ -34,6 +34,7 @@ import {
 } from "./aiFeedback.service.js";
 import {
   invalidateUserRecommendationCaches,
+  invalidateSavedPlacesCache,
 } from "../utils/cache.js";
 import { invalidatePlanForUser } from "./aiSchedule.service.js";
 import {
@@ -219,6 +220,10 @@ export const createInteraction = async (userId, placeId, actionType, metadata = 
     logger.info(`[interaction] caches invalidated for uid=${userId}`);
   }
 
+  if (actionType === "save" || actionType === "remove_save") {
+    invalidateSavedPlacesCache(userId);
+  }
+
   return interaction;
 };
 
@@ -320,6 +325,13 @@ export const createInteractionsBatch = async (userId, items) => {
     invalidateUserRecommendationCaches(userId);
     invalidatePlanForUser(userId);
     logger.info(`[interaction] batch (${results.length}) caches invalidated for uid=${userId}`);
+  }
+
+  const hasSaveChange = results.some(
+    (ix) => ix.actionType === "save" || ix.actionType === "remove_save",
+  );
+  if (hasSaveChange) {
+    invalidateSavedPlacesCache(userId);
   }
 
   return results;
