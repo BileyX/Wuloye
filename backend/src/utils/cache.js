@@ -129,3 +129,15 @@ export const profileDataCache = new TtlCache(30 * 1000, 500);
  * TTL: 60 s.  Max: 2000 entries.
  */
 export const derivedSignalsCache = new TtlCache(60 * 1000, 2000);
+
+/**
+ * Evict every cached recommendation artefact for one user.
+ * Keys use the `rec:v2:` prefix (see recommendation.service.js).
+ *
+ * @param {string} userId
+ */
+export function invalidateUserRecommendationCaches(userId) {
+  recommendationCache.deleteByPrefix(`rec:v2:${userId}:`);
+  profileDataCache.delete(`pd:${userId}`);
+  derivedSignalsCache.deleteByPrefix(`ds:${userId}:`);
+}

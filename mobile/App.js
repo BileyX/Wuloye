@@ -4,6 +4,7 @@ import { StatusBar } from "expo-status-bar";
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import { ThemeProvider, useAppTheme } from "./src/context/ThemeContext";
 import { NotificationProvider } from "./src/context/NotificationContext";
+import { InteractionStateProvider } from "./src/context/InteractionStateContext";
 import AppNavigator from "./src/navigation/AppNavigator";
 import { THEMES } from "./src/theme/theme";
 
@@ -46,9 +47,11 @@ function InnerApp() {
     const { profile } = useAuth();
 
     return (
-        <NotificationProvider profile={profile}>
-            <AppNavigator />
-        </NotificationProvider>
+        <InteractionStateProvider>
+            <NotificationProvider profile={profile}>
+                <AppNavigator />
+            </NotificationProvider>
+        </InteractionStateProvider>
     );
 }
 

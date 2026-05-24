@@ -46,7 +46,10 @@ export const errorHandler = (err, req, res, _next) => {
 
   // Log the full error in non-production environments for easier debugging
   if (process.env.NODE_ENV !== "production") {
-    logger.error(`[error] ${req.method} ${req.originalUrl}`, { err });
+    logger.error(`[error] ${req.method} ${req.originalUrl}`, {
+      message: err?.message,
+      stack:   err?.stack,
+    });
   } else {
     logger.error(`[error] ${req.method} ${req.originalUrl} — ${err.message}`);
   }

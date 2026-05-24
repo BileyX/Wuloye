@@ -4,6 +4,7 @@ import React, {
     useContext,
     useEffect,
     useMemo,
+    useRef,
     useState,
 } from "react";
 import {
@@ -26,14 +27,34 @@ import {
 } from "../api/profileApi";
 import { unwrapApiData } from "../utils/api";
 import * as authStorage from "../utils/authStorage";
+import { clearFeedCache } from "../utils/feedCache";
 
 const AuthContext = createContext(null);
 
+/** Max time to wait for GET /profile during cold start before showing an error. */
+const BOOTSTRAP_PROFILE_TIMEOUT_MS = 15_000;
+/** Max time to wait for Firebase getIdToken() during cold start. */
+const BOOTSTRAP_TOKEN_TIMEOUT_MS = 10_000;
+/** Hard ceiling — splash must never block longer than this regardless of auth state. */
+const BOOTSTRAP_SAFETY_TIMEOUT_MS = 22_000;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-async function fetchBackendProfile() {
-    const envelope = await getProfile();
+async function fetchBackendProfile(options = {}) {
+    const { timeoutMs } = options;
+    const envelope = await getProfile(
+        typeof timeoutMs === "number" ? { timeout: timeoutMs } : undefined,
+    );
     return unwrapApiData(envelope, null);
+}
+
+function withTimeout(promise, ms, message) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(message)), ms);
+        }),
+    ]);
 }
 
 // ─── Provider ────────────────────────────────────────────────────────────────
@@ -46,9 +67,22 @@ export function AuthProvider({ children }) {
     /** true once the initial auth + profile bootstrap completes */
     const [ready, setReady] = useState(false);
 
+    /** Tracks in-flight / completed bootstrap per uid to avoid splash re-lock loops. */
+    const bootstrapRef = useRef({ uid: null, inFlight: false, done: false });
+    /** Cleared as soon as bootstrap finishes so the safety timer cannot overwrite a success. */
+    const safetyTimerRef = useRef(null);
+
+    const clearSafetyTimer = useCallback(() => {
+        if (safetyTimerRef.current != null) {
+            clearTimeout(safetyTimerRef.current);
+            safetyTimerRef.current = null;
+        }
+    }, []);
+
     // ── Core profile loader ────────────────────────────────────────────────
 
-    const loadProfileForUser = useCallback(async (firebaseUser) => {
+    const loadProfileForUser = useCallback(async (firebaseUser, options = {}) => {
+        const { bootstrap = false } = options;
         if (!firebaseUser) {
             setProfile(null);
             setProfileError(null);
@@ -59,18 +93,36 @@ export function AuthProvider({ children }) {
 
         try {
             // Ensure authStorage has the latest token before the API call.
-            const token = await firebaseUser.getIdToken();
+            const tokenPromise = firebaseUser.getIdToken();
+            const token = bootstrap
+                ? await withTimeout(
+                      tokenPromise,
+                      BOOTSTRAP_TOKEN_TIMEOUT_MS,
+                      "Auth token timed out. Check your connection and try again.",
+                  )
+                : await tokenPromise;
             await authStorage.setFirebaseToken(token);
 
-            const p = await fetchBackendProfile();
-            if (p == null || typeof p !== "object") {
+            const fetchPromise = fetchBackendProfile(
+                bootstrap ? { timeoutMs: BOOTSTRAP_PROFILE_TIMEOUT_MS } : undefined,
+            );
+            const p = bootstrap
+                ? withTimeout(
+                      fetchPromise,
+                      BOOTSTRAP_PROFILE_TIMEOUT_MS + 2_000,
+                      "Profile sync timed out. Check that the backend is running and reachable.",
+                  )
+                : fetchPromise;
+
+            const profileDoc = await p;
+            if (profileDoc == null || typeof profileDoc !== "object") {
                 setProfile(null);
                 setProfileError(
                     "Invalid profile response from server. Try again.",
                 );
                 return;
             }
-            setProfile(p);
+            setProfile(profileDoc);
             setProfileError(null);
         } catch (err) {
             const httpStatus = err?.response?.status;
@@ -83,6 +135,7 @@ export function AuthProvider({ children }) {
                 if (__DEV__) {
                     console.warn("[Auth] Persistent 401 — force sign-out.");
                 }
+                bootstrapRef.current = { uid: null, inFlight: false, done: false };
                 await authStorage.clearFirebaseToken();
                 await firebaseSignOut(auth);
                 // onAuthStateChanged will fire with null; no need to set state here.
@@ -96,17 +149,41 @@ export function AuthProvider({ children }) {
                 );
             }
             setProfile(null);
-            setProfileError(err?.message ?? "Could not load profile.");
+            setProfileError(
+                err?.message ?? "Could not load profile. Check your connection.",
+            );
         }
     }, []);
 
     // ── Auth state listener ────────────────────────────────────────────────
 
     useEffect(() => {
+        // Hard safety net: never leave the splash up indefinitely if Firebase
+        // auth or the profile request stalls (e.g. backend not running).
+        // IMPORTANT: must be cancelled once bootstrap succeeds — otherwise it
+        // fires ~18s later and incorrectly sets profileError on a healthy session.
+        safetyTimerRef.current = setTimeout(() => {
+            safetyTimerRef.current = null;
+            if (bootstrapRef.current.done) return;
+
+            if (__DEV__) {
+                console.warn(
+                    "[Auth] Bootstrap safety timeout — releasing splash.",
+                );
+            }
+            setReady(true);
+            setProfileError((prev) =>
+                prev ??
+                "Startup timed out. Check that the backend is running and try again.",
+            );
+        }, BOOTSTRAP_SAFETY_TIMEOUT_MS);
+
         const unsub = onAuthStateChanged(auth, async (nextUser) => {
             setUser(nextUser);
 
             if (!nextUser) {
+                clearSafetyTimer();
+                bootstrapRef.current = { uid: null, inFlight: false, done: false };
                 setProfile(null);
                 setProfileError(null);
                 await authStorage.clearFirebaseToken();
@@ -114,22 +191,47 @@ export function AuthProvider({ children }) {
                 return;
             }
 
-            /**
-             * After the first `null` auth event we set `ready: true` (Login).
-             * When the user signs in, we must set `ready: false` again until
-             * `GET /api/profile` finishes — otherwise AppNavigator shows
-             * `user && ready && !profile` and renders an infinite loading spinner.
-             */
+            const uid = nextUser.uid;
+
+            // Firebase can emit duplicate auth events for the same signed-in
+            // user (token refresh, hot reload). Re-blocking the splash on every
+            // event leaves the app stuck on "Synchronizing profile" forever.
+            if (
+                bootstrapRef.current.uid === uid &&
+                bootstrapRef.current.done &&
+                !bootstrapRef.current.inFlight
+            ) {
+                clearSafetyTimer();
+                loadProfileForUser(nextUser).catch(() => null);
+                setReady(true);
+                return;
+            }
+            if (bootstrapRef.current.uid === uid && bootstrapRef.current.inFlight) {
+                return;
+            }
+
+            bootstrapRef.current = { uid, inFlight: true, done: false };
             setReady(false);
+            let bootstrapOk = false;
             try {
-                await loadProfileForUser(nextUser);
+                await loadProfileForUser(nextUser, { bootstrap: true });
+                bootstrapOk = true;
             } finally {
+                bootstrapRef.current = {
+                    uid,
+                    inFlight: false,
+                    done: bootstrapOk,
+                };
+                clearSafetyTimer();
                 setReady(true);
             }
         });
 
-        return unsub;
-    }, [loadProfileForUser]);
+        return () => {
+            clearSafetyTimer();
+            unsub();
+        };
+    }, [loadProfileForUser, clearSafetyTimer]);
 
     // ── Keep AsyncStorage token fresh whenever Firebase rotates the JWT ───
 
@@ -165,6 +267,11 @@ export function AuthProvider({ children }) {
             const p = await fetchBackendProfile();
             setProfile(p);
             setProfileError(null);
+            // v18: a profile change (new budget / religion / activities / etc.)
+            // invalidates every cached recommendation feed because all of them
+            // are personalised. Without this, an onboarding edit silently
+            // shows yesterday's For-You feed for the next 5 minutes.
+            clearFeedCache();
         } catch (err) {
             if (__DEV__) {
                 console.warn("[Auth] refreshProfile failed:", err?.message ?? err);
@@ -177,7 +284,13 @@ export function AuthProvider({ children }) {
     const retryProfileLoad = useCallback(async () => {
         const current = auth.currentUser;
         if (!current) return;
-        await loadProfileForUser(current);
+        setProfileError(null);
+        setReady(false);
+        try {
+            await loadProfileForUser(current, { bootstrap: true });
+        } finally {
+            setReady(true);
+        }
     }, [loadProfileForUser]);
 
     const signInWithEmail = useCallback(async (email, password) => {

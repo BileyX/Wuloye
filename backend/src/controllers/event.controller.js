@@ -14,6 +14,7 @@ import {
   getAllEvents,
   getEventById,
   getEventCandidates,
+  createEvent,
   updateEvent,
   deleteEvent,
   setEventFeatured,
@@ -444,10 +445,31 @@ export const getEventByIdHandler = async (req, res, next) => {
 
 // ─── PATCH /api/events/:id ────────────────────────────────────────────────────
 
+// ─── POST /api/events (admin) ─────────────────────────────────────────────────
+
+export const createEventHandler = async (req, res, next) => {
+  try {
+    const event = await createEvent(req.body);
+    return res.status(201).json({ success: true, data: event });
+  } catch (err) {
+    if (err.message === "title is required") {
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    next(err);
+  }
+};
+
 export const updateEventHandler = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const allowed = ["title", "description", "location", "coordinates", "date", "category", "image", "source_url"];
+    const allowed = [
+      "title", "description", "location", "coordinates", "date", "end_date",
+      "category", "image", "gallery", "source_url", "booking_url",
+      "organizer", "contact", "city", "is_paid", "ticket_price", "price_tier",
+      "is_featured", "trending", "aiBoostScore", "adminPriority",
+      "audience", "budgetLevel", "eventType", "recurring", "expiryDate",
+      "tags", "keywords",
+    ];
     const updates = {};
     for (const key of allowed) {
       if (key in req.body) updates[key] = req.body[key];

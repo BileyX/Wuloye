@@ -197,7 +197,12 @@ export const getAiScheduleHandler = async (req, res, next) => {
       ? { lat: rawLat, lng: rawLng, radiusMeters: radiusKm * 1000 }
       : null;
 
-    const { schedule, meta } = await getAiDailySchedule(req.user.uid, userLocation);
+    const refresh = req.query.refresh === "true" || req.query.refresh === "1";
+    const { schedule, meta } = await getAiDailySchedule(
+      req.user.uid,
+      userLocation,
+      { refresh },
+    );
 
     return res.status(200).json({
       success: true,

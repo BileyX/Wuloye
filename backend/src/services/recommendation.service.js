@@ -114,6 +114,7 @@ import {
   recommendationCache,
   profileDataCache,
   derivedSignalsCache,
+  invalidateUserRecommendationCaches,
 } from "../utils/cache.js";
 import {
   buildTopInterestWeights,
@@ -227,6 +228,7 @@ const callAiService = async (
   recentActions,
   typeAffinity,
   profile = {},
+  negativeMemory = {},
 ) => {
   const EMPTY = {
     scoreMap:      new Map(),
@@ -318,6 +320,20 @@ const callAiService = async (
         return "fixed";
       })(),
       explain:            explainEnabled,
+      // v18: persistent per-place negative memory — AI hard-blocks dislikes
+      // and strongly penalises dismisses regardless of recent-interaction window.
+      disliked_place_ids:      Array.isArray(negativeMemory.dislikedPlaceIds)
+                                  ? negativeMemory.dislikedPlaceIds.slice(0, 500)
+                                  : [],
+      dismissed_place_ids:     Array.isArray(negativeMemory.dismissedPlaceIds)
+                                  ? negativeMemory.dismissedPlaceIds.slice(0, 500)
+                                  : [],
+      not_interested_place_ids: Array.isArray(negativeMemory.notInterestedPlaceIds)
+                                  ? negativeMemory.notInterestedPlaceIds.slice(0, 500)
+                                  : [],
+      saved_place_ids:         Array.isArray(negativeMemory.savedPlaceIds)
+                                  ? negativeMemory.savedPlaceIds.slice(0, 500)
+                                  : [],
       ...(context.discoverCategoryKey
         ? { discover_category: context.discoverCategoryKey }
         : {}),
@@ -1378,24 +1394,91 @@ export const scorePlaceForUser = (
   }
 
   // ── Rule 26 (v14): Closed place penalty ──────────────────────────────────────
-  // Penalise places that are currently closed according to Google opening hours.
-  // The penalty is only applied when isOpen is explicitly false (not null/undefined),
-  // so Firestore-sourced places without the field are unaffected.
   if (place.isOpen === false) {
     breakdown.closedPenalty = WEIGHTS.closedPenalty;
   }
 
   // ── Rule 27 (v14): Location trend boost ──────────────────────────────────────
-  // Reward trending places: those with a high trendScore (computed from rating
-  // and review volume by googlePlaces.service.js).  Applied regardless of
-  // cold-start status so popular real-world venues surface for all users.
-  // Threshold: trendScore >= 0.5 (rating ≥ 4.5 with 500+ reviews, or similar combos).
   if ((place.trendScore ?? 0) >= 0.5) {
     breakdown.trendBoost = +(WEIGHTS.trendBoostMax * place.trendScore).toFixed(3);
   }
 
+  // ── Rule 28 (Admin boost + Contextual Audience Match) ────────────────────────
+  // Admin-curated places carry aiBoostScore (0–100) and adminPriority (0–100).
+  // Boost is scaled against the typical raw score range (−20…+80):
+  //   • Base boost: up to +15 at 100/100 combined
+  //   • Featured: +5, Trending: +3, Sponsored: +1
+  // A contextual audience match multiplier (0.4–1.0) amplifies the boost when the
+  // item's targeting criteria strongly match the current user, and reduces it for
+  // weak matches (never to zero — pass-through filtering already handles rejections).
+  breakdown.adminBoost = 0;
+  breakdown.audienceMatchScore = 0;
+  if (place.source === "admin_curated" || place.adminPriority != null || place.aiBoostScore != null) {
+    const boostPct  = Math.min(100, Math.max(0, Number(place.aiBoostScore  ?? 0)));
+    const prioPct   = Math.min(100, Math.max(0, Number(place.adminPriority ?? 50)));
+    const combined  = (boostPct * 0.55 + prioPct * 0.45) / 100; // 0–1
+    let rawBoost = combined * 15;
+    if (place.featured) rawBoost += 5;
+    if (place.trending) rawBoost += 3;
+    if (place.sponsored) rawBoost += 1;
+
+    // ── Contextual audience match score ──────────────────────────────────────
+    // Checks how well the current user's profile matches the admin's target criteria.
+    // Dimensions: budget tier, religion, gender, lifestyle tags, audience tags.
+    // Score range: 0–1, default 0.7 when no targeting is specified.
+    let matchScore = 0.7; // neutral — no targeting specified
+    const crit = place.onboardingMatchCriteria ?? {};
+    const audienceTags = Array.isArray(place.audienceTags) ? place.audienceTags : [];
+    let matchFactors = 0;
+    let matchTotal = 0;
+
+    // Budget match
+    if (crit.budgetTier) {
+      const allowed = (Array.isArray(crit.budgetTier) ? crit.budgetTier : [crit.budgetTier]).map((t) => t.toLowerCase());
+      const userTier = (profile?.budgetRange || "medium").toLowerCase();
+      matchFactors += allowed.includes(userTier) ? 1 : 0;
+      matchTotal++;
+    }
+
+    // Religion match
+    if (crit.religion) {
+      const allowed = (Array.isArray(crit.religion) ? crit.religion : [crit.religion]).map((r) => r.toLowerCase());
+      const userRel = (profile?.religion || "").toLowerCase();
+      matchFactors += (userRel && allowed.includes(userRel)) ? 1 : 0.5;
+      matchTotal++;
+    }
+
+    // Gender match
+    if (crit.gender) {
+      const allowed = (Array.isArray(crit.gender) ? crit.gender : [crit.gender]).map((g) => g.toLowerCase());
+      const userGender = (profile?.gender || "").toLowerCase();
+      matchFactors += (userGender && allowed.includes(userGender)) ? 1 : 0.5;
+      matchTotal++;
+    }
+
+    // Audience / interest tags
+    if (audienceTags.length > 0) {
+      const userInterests = new Set([
+        ...(profile?.preferredActivities ?? []),
+        ...(profile?.eventInterests ?? []),
+        ...(profile?.weeklyActivities ?? []),
+      ].map((t) => t.toLowerCase()));
+      const matches = audienceTags.filter((t) => userInterests.has(t.toLowerCase())).length;
+      matchFactors += Math.min(1, matches / Math.max(1, audienceTags.length));
+      matchTotal++;
+    }
+
+    if (matchTotal > 0) {
+      // Scale 0–1 match to 0.4–1.0 boost multiplier
+      matchScore = 0.4 + (matchFactors / matchTotal) * 0.6;
+    }
+
+    breakdown.audienceMatchScore = +matchScore.toFixed(3);
+    breakdown.adminBoost = +(rawBoost * matchScore).toFixed(3);
+  }
+
   return {
-    rawScore: blendedRawScore + breakdown.closedPenalty + breakdown.trendBoost,
+    rawScore: blendedRawScore + breakdown.closedPenalty + breakdown.trendBoost + breakdown.adminBoost,
     breakdown,
   };
 };
@@ -1519,7 +1602,8 @@ export const getRecommendations = async (
   fastMode = false,
   typeFilter = null,
   modeFilter = null,
-  discoverCategoryKey = null
+  discoverCategoryKey = null,
+  forceRefresh = false,
 ) => {
   const startMs = performance.now();
   concurrentRecommendationRequests.count += 1;
@@ -1552,8 +1636,15 @@ export const getRecommendations = async (
 
     logger.info(
       `[recommendations] uid=${userId} time=${context.timeOfDay} isWeekend=${context.isWeekend} ` +
-      `isLateNight=${context.isLateNight} fastMode=${effectiveFast} autoLoad=${autoFast}`
+      `isLateNight=${context.isLateNight} fastMode=${effectiveFast} autoLoad=${autoFast} ` +
+      `forceRefresh=${forceRefresh}`,
     );
+
+  // Pull-to-refresh / explicit refresh: bust every cached layer for this user
+  // so interactions, affinity, and bandit state are re-read from Firestore.
+  if (forceRefresh && !debug) {
+    invalidateUserRecommendationCaches(userId);
+  }
 
   // ── Phase 15: Profile data cache ─────────────────────────────────────────────
   // Caches { profile, routines, interactions, session } per user for 30 s.
@@ -1591,7 +1682,7 @@ export const getRecommendations = async (
     experimentActive ? experimentVariant : "off"
   }:${typeFilterKey}:${modeKey}:rel:${userReligionEarly}`;
 
-  if (!debug) {
+  if (!debug && !forceRefresh) {
     const cached = recommendationCache.get(recCacheKey);
     if (cached) {
       const elapsedMs = Math.round(performance.now() - startMs);
@@ -1688,6 +1779,120 @@ export const getRecommendations = async (
       userLocation?.lat != null ? { lat: userLocation.lat, lng: userLocation.lng } : null,
       radiusMeters
     );
+  }
+
+  // ── Inject admin-curated recommendations into the place catalogue ────────────
+  // All curated recs (featured OR trending OR boosted) are pulled and checked
+  // against user profile targeting BEFORE being added to the scoring pool.
+  // Fast mode skips this to keep latency low.
+  if (!fastMode) {
+    try {
+      // Pull up to 100 curated items (featured + trending + high-boost)
+      const [featuredSnap, trendingSnap] = await Promise.all([
+        db.collection("curated_recommendations").where("featured", "==", true).limit(50).get(),
+        db.collection("curated_recommendations").where("trending", "==", true).limit(50).get(),
+      ]);
+
+      const allCuratedDocs = new Map();
+      for (const snap of [featuredSnap, trendingSnap]) {
+        for (const d of snap.docs) {
+          allCuratedDocs.set(d.id, d);
+        }
+      }
+
+      // Also pull high-priority items not already caught above
+      const highPrioSnap = await db.collection("curated_recommendations")
+        .orderBy("adminPriority", "desc").limit(30).get();
+      for (const d of highPrioSnap.docs) {
+        if (!allCuratedDocs.has(d.id)) allCuratedDocs.set(d.id, d);
+      }
+
+      // Resolve user profile for targeting
+      const _profile = profile ?? {};
+      const _userBudgetLabel = (_profile.budgetRange || "").toLowerCase();
+      const _userReligionStr = (_profile.religion || "").toLowerCase();
+      const _userGender      = (_profile.gender || "").toLowerCase();
+
+      // ── Targeting check: only admit curated items that match user context ──
+      const curatedPassed = [];
+      for (const [, d] of allCuratedDocs) {
+        const c = d.data();
+        const crit = c.onboardingMatchCriteria ?? {};
+
+        // Budget targeting — only reject if explicitly set and doesn't match
+        if (crit.budgetTier) {
+          const allowed = Array.isArray(crit.budgetTier) ? crit.budgetTier : [crit.budgetTier];
+          const userTier = _userBudgetLabel || "medium";
+          if (allowed.length > 0 && !allowed.some((t) => t.toLowerCase() === userTier)) continue;
+        }
+
+        // Religion targeting
+        if (crit.religion) {
+          const allowed = Array.isArray(crit.religion) ? crit.religion : [crit.religion];
+          if (allowed.length > 0 && _userReligionStr && !allowed.some((r) => r.toLowerCase() === _userReligionStr)) continue;
+        }
+
+        // Gender targeting
+        if (crit.gender) {
+          const allowed = Array.isArray(crit.gender) ? crit.gender : [crit.gender];
+          if (allowed.length > 0 && _userGender && !allowed.some((g) => g.toLowerCase() === _userGender)) continue;
+        }
+
+        // Audience tags — match if user profile has ANY matching interest
+        if (Array.isArray(crit.audienceTags) && crit.audienceTags.length > 0) {
+          const userInterests = new Set([
+            ...(_profile.preferredActivities ?? []),
+            ...(_profile.eventInterests ?? []),
+            ...(_profile.weeklyActivities ?? []),
+          ].map((t) => t.toLowerCase()));
+          const hasMatch = crit.audienceTags.some((tag) => userInterests.has(tag.toLowerCase()));
+          if (!hasMatch && userInterests.size > 0) continue;
+        }
+
+        curatedPassed.push({
+          id: d.id,
+          name: c.name,
+          type: c.category,
+          category: c.category,
+          description: c.description ?? "",
+          priceRange: c.budgetTier ?? "medium",
+          tags: c.tags ?? [],
+          location: c.location ?? {},
+          rating: c.rating ?? 4.2,
+          popularityScore: (c.adminPriority ?? 50) / 10,
+          images: c.coverUrl ? [c.coverUrl] : (c.gallery ?? []),
+          thumbnailUrl: c.thumbnailUrl ?? null,
+          adminPriority: c.adminPriority ?? 50,
+          aiBoostScore: c.aiBoostScore ?? 0,
+          featured: c.featured ?? false,
+          trending: c.trending ?? false,
+          sponsored: c.sponsored ?? false,
+          source: "admin_curated",
+          adminCurated: true,
+          googlePlaceId: c.googlePlaceId ?? null,
+          googleMapsUrl: c.googleMapsUrl ?? null,
+          familyFriendly: c.familyFriendly ?? null,
+          studentFriendly: c.studentFriendly ?? null,
+          professionalFriendly: c.professionalFriendly ?? null,
+        });
+      }
+
+      // Merge, deduplicating by googlePlaceId or id
+      const existingIds = new Set(places.map((p) => p.googlePlaceId ?? p.id));
+      let injected = 0;
+      for (const c of curatedPassed) {
+        if (!existingIds.has(c.googlePlaceId ?? c.id)) {
+          places.push(c);
+          existingIds.add(c.googlePlaceId ?? c.id);
+          injected++;
+        }
+      }
+      if (injected > 0) {
+        logger.debug(`[recommendations] injected ${injected} curated recommendations (${curatedPassed.length} passed targeting)`);
+      }
+    } catch (e) {
+      logger.warn(`[recommendations] curated injection failed: ${e.message}`);
+    }
   }
 
   const placeCategoryActive =
@@ -1870,6 +2075,25 @@ export const getRecommendations = async (
     });
   }
 
+  // ── v18: Merge persistent per-place negative memory ─────────────────────────
+  // The strong-signal sets above only see recent interactions (RECENT window).
+  // Without merging the profile-level sets, a dismissed place quietly returns
+  // after the user's interaction history scrolls past it. We union both so the
+  // user's negative intent is permanent until they reverse it (save/like).
+  const persistentSaved        = new Set(Array.isArray(profile.savedPlaceIds)         ? profile.savedPlaceIds         : []);
+  const persistentDismissed    = new Set(Array.isArray(profile.dismissedPlaceIds)     ? profile.dismissedPlaceIds     : []);
+  const persistentDisliked     = new Set(Array.isArray(profile.dislikedPlaceIds)      ? profile.dislikedPlaceIds      : []);
+  const persistentNotInterested = new Set(Array.isArray(profile.notInterestedPlaceIds) ? profile.notInterestedPlaceIds : []);
+
+  for (const id of persistentSaved)     savedIds.add(id);
+  for (const id of persistentDismissed) dismissedIds.add(id);
+
+  // Hard-block set — these places must NEVER appear in recommendations.
+  // (dislike + not_interested are the user's strongest "stop showing me" signals.)
+  const hardBlockedIds = new Set();
+  for (const id of persistentDisliked)     hardBlockedIds.add(id);
+  for (const id of persistentNotInterested) hardBlockedIds.add(id);
+
   // ── v7: Short-term memory window (newest-first, capped at RECENT_INTERACTIONS_WINDOW) ──
   const recentInteractions = interactions
     .slice()
@@ -2028,12 +2252,47 @@ export const getRecommendations = async (
       entry.userRatingsTotal = place.userRatingsTotal;
     }
 
+    // Admin curation metadata — consumed by mobile badges (Featured, Trending, Admin Pick)
+    if (place.adminCurated || place.source === "admin_curated") {
+      entry.adminCurated      = true;
+      entry.featured          = place.featured   ?? false;
+      entry.trending          = place.trending   ?? false;
+      entry.sponsored         = place.sponsored  ?? false;
+      entry.adminBoostApplied = breakdown.adminBoost ?? 0;
+      entry.audienceMatchScore = breakdown.audienceMatchScore ?? null;
+      entry.googlePlaceId     = place.googlePlaceId ?? null;
+      entry.googleMapsUrl     = place.googleMapsUrl ?? null;
+      entry.thumbnailUrl      = place.thumbnailUrl  ?? null;
+    } else {
+      // Carry featured/trending even for regular places set by admin via PATCH /places/:id/boost
+      if (place.featured) entry.featured = true;
+      if (place.trending) entry.trending = true;
+      if (breakdown.adminBoost > 0) {
+        entry.adminBoostApplied = breakdown.adminBoost;
+        entry.audienceMatchScore = breakdown.audienceMatchScore ?? null;
+      }
+    }
+
     if (debug) entry.scoreBreakdown = breakdown;
 
     return entry;
   };
 
-  const scored = await scorePlacesInChunks(scoringPlaces, scoreOne);
+  // v18: Hard-block disliked + not_interested places before we even score them.
+  // Saves compute and guarantees they never surface, even via diversity passes.
+  const scorablePlaces = hardBlockedIds.size > 0
+    ? scoringPlaces.filter((p) => !hardBlockedIds.has(p.id))
+    : scoringPlaces;
+
+  if (hardBlockedIds.size > 0 && scorablePlaces.length < scoringPlaces.length) {
+    logger.info(
+      `[recommendations] hardBlock filter uid=${userId} ` +
+      `blocked=${scoringPlaces.length - scorablePlaces.length} ` +
+      `(disliked=${persistentDisliked.size} notInterested=${persistentNotInterested.size})`,
+    );
+  }
+
+  const scored = await scorePlacesInChunks(scorablePlaces, scoreOne);
 
   // ── Phase AI: Merge Python AI service scores ──────────────────────────────────
   // Calls /predict on the AI microservice (contextual bandit + GRU + embeddings).
@@ -2060,6 +2319,14 @@ export const getRecommendations = async (
       recentActions,
       profile?.typeAffinity,
       profile,
+      {
+        // v18: forward persistent negative memory so the AI service can also
+        // hard-block and penalise at the per-place level (defence in depth).
+        dislikedPlaceIds:      Array.from(persistentDisliked),
+        dismissedPlaceIds:     Array.from(persistentDismissed),
+        notInterestedPlaceIds: Array.from(persistentNotInterested),
+        savedPlaceIds:         Array.from(persistentSaved),
+      },
     );
 
     _aiPredictedType = predictedType;
@@ -2180,6 +2447,19 @@ export const getRecommendations = async (
   // ── Phase 3: Sort descending by normalized score ──────────────────────────────
   withoutDismissed.sort((a, b) => b.score - a.score);
 
+  // Pull-to-refresh: deprioritise recently shown places so the feed rotates
+  // instead of returning the exact same top picks on every swipe-down.
+  if (forceRefresh) {
+    const recentlyShown = new Set((profile.seenPlaces ?? []).slice(-15));
+    for (const entry of withoutDismissed) {
+      if (recentlyShown.has(entry.id)) {
+        entry.rawScore = +(entry.rawScore - 8).toFixed(3);
+        entry.score    = normalizeScore(entry.rawScore);
+      }
+    }
+    withoutDismissed.sort((a, b) => b.score - a.score);
+  }
+
   // ── Phase 3b (v8 NEW): Type-diversity penalty pass ───────────────────────────
   // Walk the sorted list and apply an increasing penalty each time the same
   // type appears consecutively.  This discourages runs of identical types at
@@ -2272,12 +2552,25 @@ export const getRecommendations = async (
 
   // ── Mode override: re-rank the final list for trending / nearby ──────────────
   if (modeFilter === "trending") {
-    // Trending: surface places with the highest trendScore × rating signal.
-    // Give AI score a 10% tie-breaker weight so cold-start doesn't look random.
+    // Trending sort order:
+    //   1. Admin-marked trending items (source=admin_curated + trending=true) → ranked
+    //      by adminPriority descending, then AI score
+    //   2. Remaining places: ranked by trendScore × rating × 0.9 + AI score × 0.1
     recommendations.sort((a, b) => {
+      const aAdminTrend = (a.adminCurated || a.trending) ? 1 : 0;
+      const bAdminTrend = (b.adminCurated || b.trending) ? 1 : 0;
+      if (aAdminTrend !== bAdminTrend) return bAdminTrend - aAdminTrend;
+
+      // Among admin-trending items, sort by adminPriority then score
+      if (aAdminTrend && bAdminTrend) {
+        const pDiff = (b.adminBoostApplied ?? 0) - (a.adminBoostApplied ?? 0);
+        if (Math.abs(pDiff) > 0.5) return pDiff;
+        return b.score - a.score;
+      }
+
+      // Regular places: trendScore × rating signal
       const trendA = (a.trendScore ?? 0) * (a.rating ?? 3);
       const trendB = (b.trendScore ?? 0) * (b.rating ?? 3);
-      // If neither place has a meaningful trendScore, fall back to AI score.
       if (trendA === 0 && trendB === 0) return b.score - a.score;
       return trendB + b.score * 0.1 - (trendA + a.score * 0.1);
     });

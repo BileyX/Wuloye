@@ -17,11 +17,10 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
 import { useAppTheme } from "../context/ThemeContext";
-import {
-    getRecommendations,
-    parseRecommendationsResponse,
-} from "../api/recommendationApi";
+import { useAuth } from "../context/AuthContext";
+import apiClient from "../api/client";
 import {
     createInteraction,
     createInteractionsBatch,
@@ -31,8 +30,27 @@ import { normalisePlace } from "../utils/recommendationPlaces";
 import { getApiErrorMessage } from "../utils/api";
 import Loader from "../components/Loader";
 import DiscoverCard from "../components/DiscoverCard";
-import useLocation from "../hooks/useLocation";
 import { prefetchPlaceDetails } from "../api/placeApi";
+
+const TRENDING_FETCH_RETRIES = 2;
+const TRENDING_RETRY_DELAY_MS = 700;
+
+async function fetchTrendingFeedWithRetry() {
+    let lastErr;
+    for (let attempt = 0; attempt <= TRENDING_FETCH_RETRIES; attempt++) {
+        try {
+            return await apiClient.get("/recommendations/trending-feed");
+        } catch (err) {
+            lastErr = err;
+            const status = err?.response?.status;
+            if (status === 401 || status === 403) throw err;
+            if (attempt < TRENDING_FETCH_RETRIES) {
+                await new Promise((r) => setTimeout(r, TRENDING_RETRY_DELAY_MS));
+            }
+        }
+    }
+    throw lastErr;
+}
 
 // ─── Rank badge (1st / 2nd / 3rd colours) ────────────────────────────────────
 
@@ -169,8 +187,8 @@ function TrendingBanner({ palette, isDark, count, gradients }) {
                     }}
                 >
                     {count > 0
-                        ? `${count} popular place${count !== 1 ? "s" : ""} ranked by real activity`
-                        : "Loading popular places near you…"}
+                        ? `${count} admin-curated pick${count !== 1 ? "s" : ""} personalized for you`
+                        : "Loading curated trending picks…"}
                 </Text>
             </View>
         </LinearGradient>
@@ -181,6 +199,7 @@ function TrendingBanner({ palette, isDark, count, gradients }) {
 
 export default function TrendingScreen({ navigation }) {
     const { palette, gradients, isDark } = useAppTheme();
+    const { ready, user } = useAuth();
     const styles = useMemo(
         () => createStyles(palette, isDark),
         [palette, isDark],
@@ -190,20 +209,7 @@ export default function TrendingScreen({ navigation }) {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState("");
-    /** Same as Home: wait for one GPS attempt so first fetch can use Google Places (with photos). */
-    const [geoPrimed, setGeoPrimed] = useState(false);
-
-    const { location: geoLocation, requestCurrentLocation } = useLocation();
-
-    const recommendationParams = useMemo(() => {
-        const base = { mode: "trending" };
-        const lat = geoLocation?.coords?.latitude;
-        const lng = geoLocation?.coords?.longitude;
-        if (typeof lat === "number" && typeof lng === "number") {
-            return { ...base, lat, lng, radius: 5 };
-        }
-        return base;
-    }, [geoLocation]);
+    const hasLoadedRef = useRef(false);
 
     const refreshTimerRef = useRef(null);
     const headerAnim = useRef(new Animated.Value(0)).current;
@@ -216,74 +222,58 @@ export default function TrendingScreen({ navigation }) {
         }).start();
     }, [headerAnim]);
 
-    useEffect(() => {
-        let cancelled = false;
-        (async () => {
-            await requestCurrentLocation();
-            if (!cancelled) setGeoPrimed(true);
-        })();
-        return () => {
-            cancelled = true;
-        };
-    }, [requestCurrentLocation]);
-
-    const fetchPlaces = useCallback(async () => {
+    const fetchPlaces = useCallback(async ({ silent = false } = {}) => {
+        if (!user) return;
         try {
-            setLoading(true);
+            if (!silent) setLoading(true);
             setError("");
 
-            const envelope = await getRecommendations(recommendationParams);
-            const { recommendations, meta } =
-                parseRecommendationsResponse(envelope);
+            const resp = await fetchTrendingFeedWithRetry();
+            const adminItems = resp?.data?.data ?? [];
+            const meta = resp?.data?.meta ?? null;
 
-            const mapped = Array.isArray(recommendations)
-                ? recommendations.map((item, idx) =>
+            const mapped = Array.isArray(adminItems)
+                ? adminItems.map((item, idx) =>
                       normalisePlace(item, idx, meta),
                   )
                 : [];
 
             setPlaces(mapped);
+            hasLoadedRef.current = true;
 
             if (mapped.length > 0) {
                 const impressions = mapped.slice(0, 6).map((p) => ({
                     placeId: p.placeId,
                     actionType: INTERACTION_TYPES.VIEW,
-                    metadata: { source: "trending_feed", place: p },
+                    metadata: { source: "admin_trending_feed", place: p },
                 }));
                 createInteractionsBatch(impressions).catch(() => null);
             }
         } catch (err) {
-            setError(getApiErrorMessage(err, "Unable to load trending places."));
+            setError(getApiErrorMessage(err, "Unable to load trending picks."));
+            if (!hasLoadedRef.current) setPlaces([]);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
-    }, [recommendationParams]);
+    }, [user]);
 
-    useEffect(() => {
-        if (!geoPrimed) return;
-        fetchPlaces();
-    }, [geoPrimed, fetchPlaces]);
+    // Wait for auth bootstrap, then load — refetch every time screen is focused.
+    useFocusEffect(
+        useCallback(() => {
+            if (!ready || !user) return undefined;
+            fetchPlaces({ silent: hasLoadedRef.current });
+            return undefined;
+        }, [ready, user, fetchPlaces]),
+    );
 
     useEffect(() => () => clearTimeout(refreshTimerRef.current), []);
 
     const scheduleRefresh = useCallback(() => {
         clearTimeout(refreshTimerRef.current);
-        refreshTimerRef.current = setTimeout(async () => {
-            try {
-                const envelope = await getRecommendations(recommendationParams);
-                const { recommendations, meta } =
-                    parseRecommendationsResponse(envelope);
-                const mapped = Array.isArray(recommendations)
-                    ? recommendations.map((item, idx) =>
-                          normalisePlace(item, idx, meta),
-                      )
-                    : [];
-                setPlaces(mapped);
-            } catch {
-                // silent
-            }
+        refreshTimerRef.current = setTimeout(() => {
+            fetchPlaces().catch(() => null);
         }, 1500);
-    }, [recommendationParams]);
+    }, [fetchPlaces]);
 
     async function handleRefresh() {
         setRefreshing(true);
@@ -298,8 +288,13 @@ export default function TrendingScreen({ navigation }) {
         createInteraction({
             placeId: place.placeId,
             actionType: INTERACTION_TYPES.CLICK,
-            metadata: { source: "trending_feed", place },
+            metadata: { source: "admin_trending_feed", place },
         }).catch(() => null);
+
+        if (place?.category === "event" && place?._eventForDetail) {
+            navigation.navigate("EventDetail", { event: place._eventForDetail });
+            return;
+        }
         navigation.navigate("PlaceDetail", { place });
     }
 
@@ -371,7 +366,7 @@ export default function TrendingScreen({ navigation }) {
                         />
                     </Pressable>
                     <View style={{ flex: 1 }}>
-                        <Text style={styles.eyebrow}>Popularity-ranked</Text>
+                        <Text style={styles.eyebrow}>Admin curated</Text>
                         <Text style={styles.title}>Trending Now</Text>
                     </View>
                     <Pressable
@@ -394,14 +389,21 @@ export default function TrendingScreen({ navigation }) {
                     </Pressable>
                 </Animated.View>
 
-                {loading && !refreshing ? (
+                {loading && !refreshing && (!ready || !hasLoadedRef.current) ? (
                     <View style={{ paddingTop: 20 }}>
                         <Loader />
                     </View>
                 ) : (
                     <FlatList
                         data={places}
-                        keyExtractor={(item) => item.id}
+                        keyExtractor={(item, index) =>
+                            String(
+                                item.trendingEntryId ??
+                                    item.placeId ??
+                                    item.id ??
+                                    index,
+                            )
+                        }
                         showsVerticalScrollIndicator={false}
                         refreshing={refreshing}
                         onRefresh={handleRefresh}
@@ -419,7 +421,7 @@ export default function TrendingScreen({ navigation }) {
                                 ) : null}
                                 {places.length > 0 && (
                                     <Text style={styles.sectionLabel}>
-                                        Top Places
+                                        Trending Picks
                                     </Text>
                                 )}
                             </View>
@@ -434,10 +436,10 @@ export default function TrendingScreen({ navigation }) {
                                         style={{ marginBottom: 12 }}
                                     />
                                     <Text style={styles.emptyTitle}>
-                                        Nothing trending yet
+                                        No trending picks yet
                                     </Text>
                                     <Text style={styles.emptySub}>
-                                        Check back soon as more people discover places near you.
+                                        Our team is curating what's hot. Check back soon — or explore For You on the home screen.
                                     </Text>
                                 </View>
                             ) : null

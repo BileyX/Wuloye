@@ -12,6 +12,9 @@ export default function TopGreetingBanner({
     actionIcon = "notifications-outline",
     /** Unread count for notification bell (modern app badge). */
     actionBadgeCount = 0,
+    /** Optional pull-to-refresh equivalent — manual feed reload. */
+    onRefresh,
+    refreshing = false,
 }) {
     const { palette, gradients, isDark } = useAppTheme();
     const styles = useMemo(
@@ -46,35 +49,67 @@ export default function TopGreetingBanner({
                 ) : null}
             </View>
 
-            {onAction ? (
-                <Pressable style={styles.actionButtonWrap} onPress={onAction}>
-                    <LinearGradient
-                        colors={
-                            isDark
-                                ? ["rgba(16,39,64,0.96)", "rgba(21,61,89,0.92)"]
-                                : gradients.navActivePill
-                        }
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.actionButton}
-                    >
-                        <Ionicons
-                            name={actionIcon}
-                            size={18}
-                            color={isDark ? palette.iceWhite : palette.iceWhite}
-                        />
-                    </LinearGradient>
-                    {actionBadgeCount > 0 ? (
-                        <View
-                            style={styles.badge}
-                            accessibilityLabel={`${actionBadgeCount} unread notifications`}
+            {onRefresh || onAction ? (
+                <View style={styles.actionsRow}>
+                    {onRefresh ? (
+                        <Pressable
+                            style={styles.actionButtonWrap}
+                            onPress={onRefresh}
+                            disabled={refreshing}
+                            accessibilityRole="button"
+                            accessibilityLabel="Refresh recommendations"
                         >
-                            <Text style={styles.badgeText}>
-                                {actionBadgeCount > 99 ? "99+" : actionBadgeCount}
-                            </Text>
-                        </View>
+                            <LinearGradient
+                                colors={
+                                    isDark
+                                        ? ["rgba(16,39,64,0.96)", "rgba(21,61,89,0.92)"]
+                                        : gradients.navActivePill
+                                }
+                                start={{ x: 0, y: 0 }}
+                                end={{ x: 1, y: 1 }}
+                                style={styles.actionButton}
+                            >
+                                <Ionicons
+                                    name="refresh"
+                                    size={18}
+                                    color={palette.iceWhite}
+                                    style={refreshing ? { opacity: 0.45 } : null}
+                                />
+                            </LinearGradient>
+                        </Pressable>
                     ) : null}
-                </Pressable>
+
+                    {onAction ? (
+                        <Pressable style={styles.actionButtonWrap} onPress={onAction}>
+                            <LinearGradient
+                                colors={
+                                    isDark
+                                        ? ["rgba(16,39,64,0.96)", "rgba(21,61,89,0.92)"]
+                                        : gradients.navActivePill
+                                }
+                                start={{ x: 0, y: 0 }}
+                                end={{ x: 1, y: 1 }}
+                                style={styles.actionButton}
+                            >
+                                <Ionicons
+                                    name={actionIcon}
+                                    size={18}
+                                    color={isDark ? palette.iceWhite : palette.iceWhite}
+                                />
+                            </LinearGradient>
+                            {actionBadgeCount > 0 ? (
+                                <View
+                                    style={styles.badge}
+                                    accessibilityLabel={`${actionBadgeCount} unread notifications`}
+                                >
+                                    <Text style={styles.badgeText}>
+                                        {actionBadgeCount > 99 ? "99+" : actionBadgeCount}
+                                    </Text>
+                                </View>
+                            ) : null}
+                        </Pressable>
+                    ) : null}
+                </View>
             ) : null}
         </LinearGradient>
     );
@@ -124,6 +159,11 @@ function createStyles(palette, isDark) {
             fontSize: 12,
             lineHeight: 17,
             fontWeight: "600",
+        },
+        actionsRow: {
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 8,
         },
         actionButtonWrap: {
             position: "relative",

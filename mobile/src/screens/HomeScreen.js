@@ -19,14 +19,17 @@ import {
 import { INTERACTION_TYPES } from "../utils/constants";
 import { normalisePlace } from "../utils/recommendationPlaces";
 import { getApiErrorMessage } from "../utils/api";
+import { removePlaceFromList } from "../utils/feedAnimations";
 import {
     buildFeedCacheKey,
+    deleteFeedCache,
     getFeedCache,
     setFeedCache,
 } from "../utils/feedCache";
 import { useAppTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { useNotifications } from "../context/NotificationContext";
+import { useInteractionState } from "../context/InteractionStateContext";
 import useLocation from "../hooks/useLocation";
 import { prefetchPlaceDetails } from "../api/placeApi";
 import {
@@ -168,22 +171,59 @@ export default function HomeScreen({ navigation }) {
     const [refreshing, setRefreshing] = useState(false);
     const [now, setNow] = useState(() => new Date());
     const [aiMeta, setAiMeta] = useState(null);
-    const [likedPlaceIds, setLikedPlaceIds] = useState(() => new Set());
-    const [savedPlaceIds, setSavedPlaceIds] = useState(() => new Set());
-    const refreshTimerRef = useRef(null);
+    // v18: liked/saved/disliked sets now live in the shared interaction store.
+    // They are hydrated once from the server on first sign-in and synced across
+    // every screen, so a place saved on Discover shows as saved here too.
+    const {
+        liked: likedPlaceIds,
+        saved: savedPlaceIds,
+        disliked: dislikedPlaceIds,
+        dismissed: dismissedPlaceIds,
+        markLiked,
+        markSaved,
+        markRemoveSave,
+        markDisliked,
+        markDismissed,
+    } = useInteractionState();
+
+    // Filter any server-returned place list against our local negative memory
+    // so that disliked / dismissed places never re-surface after a re-fetch.
+    const filterNegative = useCallback(
+        (list) => {
+            if (!Array.isArray(list) || (dislikedPlaceIds.size === 0 && dismissedPlaceIds.size === 0)) {
+                return list;
+            }
+            return list.filter((p) => {
+                const id = p.placeId ?? p.id;
+                return !dislikedPlaceIds.has(id) && !dismissedPlaceIds.has(id);
+            });
+        },
+        [dislikedPlaceIds, dismissedPlaceIds],
+    );
+    const filterNegativeRef = useRef(filterNegative);
+    filterNegativeRef.current = filterNegative;
+    /** Prevent duplicate VIEW impressions from re-triggering server work. */
+    const impressionsLoggedRef = useRef(new Set());
     /** After one attempt to read GPS (success or deny) — avoids a Firestore-only flash before coords arrive. */
     const [geoPrimed, setGeoPrimed] = useState(false);
 
     const { location: geoLocation, requestCurrentLocation } = useLocation();
 
+    const geoLatKey =
+        typeof geoLocation?.coords?.latitude === "number"
+            ? Math.round(geoLocation.coords.latitude * 100) / 100
+            : null;
+    const geoLngKey =
+        typeof geoLocation?.coords?.longitude === "number"
+            ? Math.round(geoLocation.coords.longitude * 100) / 100
+            : null;
+
     const recommendationParams = useMemo(() => {
-        const lat = geoLocation?.coords?.latitude;
-        const lng = geoLocation?.coords?.longitude;
-        if (typeof lat === "number" && typeof lng === "number") {
-            return { lat, lng, radius: 5 };
+        if (geoLatKey != null && geoLngKey != null) {
+            return { lat: geoLatKey, lng: geoLngKey, radius: 5 };
         }
         return {};
-    }, [geoLocation]);
+    }, [geoLatKey, geoLngKey]);
 
     useEffect(() => {
         let cancelled = false;
@@ -207,55 +247,71 @@ export default function HomeScreen({ navigation }) {
             buildFeedCacheKey({
                 scope: "home",
                 filter: "all",
-                lat: geoLocation?.coords?.latitude ?? null,
-                lng: geoLocation?.coords?.longitude ?? null,
+                lat: geoLatKey,
+                lng: geoLngKey,
             }),
-        [geoLocation],
+        [geoLatKey, geoLngKey],
     );
 
-    const fetchData = useCallback(async () => {
-        const cached = getFeedCache(homeCacheKey);
+    const fetchData = useCallback(async (opts = {}) => {
+        const { forceRefresh = false } = opts;
+        const cached = forceRefresh ? null : getFeedCache(homeCacheKey);
         const hadCache = Boolean(cached?.places?.length);
         if (hadCache) {
             setPlaces(cached.places);
             setAiMeta(cached.aiMeta);
             setLoading(false);
             setError("");
-        } else {
+        } else if (!forceRefresh) {
             setLoading(true);
             setError("");
         }
 
         try {
+            const requestParams = forceRefresh
+                ? { ...recommendationParams, refresh: "true" }
+                : recommendationParams;
+
             const [, recommendationsEnvelope] = await Promise.all([
                 refreshProfile(),
-                getRecommendations(recommendationParams),
+                getRecommendations(requestParams),
             ]);
 
             const { recommendations, meta } = parseRecommendationsResponse(
                 recommendationsEnvelope,
             );
-            const mapped = Array.isArray(recommendations)
-                ? recommendations.map((item, index) =>
-                      normalisePlace(item, index, meta),
-                  )
-                : [];
+            const mapped = filterNegativeRef.current(
+                Array.isArray(recommendations)
+                    ? recommendations.map((item, index) =>
+                          normalisePlace(item, index, meta),
+                      )
+                    : [],
+            );
 
             setPlaces(mapped);
             setAiMeta(meta?.ai ?? null);
             setFeedCache(homeCacheKey, mapped, meta?.ai ?? null);
 
             if (mapped.length > 0) {
-                const impressionItems = mapped.slice(0, 8).map((place) => ({
-                    placeId: place.placeId,
-                    actionType: INTERACTION_TYPES.VIEW,
-                    metadata: {
-                        source: "home_feed",
-                        place,
-                    },
-                }));
+                const impressionItems = mapped.slice(0, 8).flatMap((place) => {
+                    const pid = place.placeId ?? place.id;
+                    if (!pid || impressionsLoggedRef.current.has(pid)) {
+                        return [];
+                    }
+                    impressionsLoggedRef.current.add(pid);
+                    return [{
+                        placeId: pid,
+                        actionType: INTERACTION_TYPES.VIEW,
+                        metadata: {
+                            source: "home_feed",
+                            place,
+                        },
+                    }];
+                });
 
-                createInteractionsBatch(impressionItems).catch(() => null);
+                if (impressionItems.length > 0) {
+                    createInteractionsBatch(impressionItems).catch(() => null);
+                }
             }
         } catch (err) {
             if (!hadCache) {
@@ -268,10 +324,18 @@ export default function HomeScreen({ navigation }) {
         }
     }, [recommendationParams, refreshProfile, homeCacheKey]);
 
+    // Initial load only — never re-run because interaction Sets changed.
     useEffect(() => {
         if (!geoPrimed) return;
         fetchData();
-    }, [geoPrimed, fetchData]);
+    }, [geoPrimed, homeCacheKey, fetchData]);
+
+    // Sync hidden places when returning to this tab (e.g. disliked on detail screen).
+    useFocusEffect(
+        useCallback(() => {
+            setPlaces((current) => filterNegativeRef.current(current));
+        }, []),
+    );
 
     useEffect(() => {
         const timer = setInterval(() => {
@@ -281,49 +345,24 @@ export default function HomeScreen({ navigation }) {
         return () => clearInterval(timer);
     }, []);
 
-    // Clear any pending refresh timer on unmount
-    useEffect(() => () => clearTimeout(refreshTimerRef.current), []);
-
-    // Re-fetch recommendations 1.5 s after an interaction so the AI has time
-    // to process the signal and return updated scores on the next request.
-    const scheduleRefresh = useCallback(() => {
-        clearTimeout(refreshTimerRef.current);
-        refreshTimerRef.current = setTimeout(async () => {
-            try {
-                const recommendationsEnvelope = await getRecommendations(
-                    recommendationParams,
-                );
-                const { recommendations, meta } =
-                    parseRecommendationsResponse(recommendationsEnvelope);
-                const mapped = Array.isArray(recommendations)
-                    ? recommendations.map((item, idx) =>
-                          normalisePlace(item, idx, meta),
-                      )
-                    : [];
-                setPlaces(mapped);
-                setAiMeta(meta?.ai ?? null);
-            } catch {
-                // silent — keep existing list if refresh fails
-            }
-        }, 1500);
-    }, [recommendationParams]);
-
     async function handleRefresh() {
+        if (refreshing) return;
         try {
             setRefreshing(true);
-            await fetchData();
+            deleteFeedCache(homeCacheKey);
+            await fetchData({ forceRefresh: true });
         } finally {
             setRefreshing(false);
         }
     }
 
-    function handleOpenDetail(place) {
+    const handleOpenDetail = useCallback((place) => {
         createInteraction({
             placeId: place.placeId,
             actionType: INTERACTION_TYPES.CLICK,
             metadata: {
                 source: "home_feed",
-                place,
+                place: place,
             },
         }).catch(() => null);
 
@@ -336,56 +375,82 @@ export default function HomeScreen({ navigation }) {
             return;
         }
         navigation.navigate("PlaceDetail", { place });
-    }
+    }, [navigation]);
 
-    function handleSave(place) {
+    const handleSave = useCallback((place) => {
         const id = place.placeId ?? place.id;
-        // Optimistic: mark saved immediately in the Set, then sync in background
-        setSavedPlaceIds((prev) => {
-            const next = new Set(prev);
-            next.add(id);
-            return next;
-        });
-        createInteraction({
-            placeId: id,
-            actionType: INTERACTION_TYPES.SAVE,
-            metadata: { source: "home_feed" },
-        }).catch(() => null);
-        scheduleRefresh();
-    }
-
-    function handleDismiss(place) {
-        const id = place.placeId ?? place.id;
-        // Optimistic: remove from list instantly
-        setPlaces((current) =>
-            current.filter((item) => (item.placeId ?? item.id) !== id),
-        );
-        createInteraction({
-            placeId: id,
-            actionType: INTERACTION_TYPES.DISMISS,
-            metadata: { source: "home_feed" },
-        }).catch(() => null);
-        scheduleRefresh();
-    }
-
-    function handleLike(place) {
-        const id = place.placeId ?? place.id;
-        const already = likedPlaceIds.has(id);
-        setLikedPlaceIds((prev) => {
-            const next = new Set(prev);
-            if (already) next.delete(id);
-            else next.add(id);
-            return next;
-        });
-        if (!already) {
-            createInteraction({
-                placeId: id,
-                actionType: INTERACTION_TYPES.LIKE,
-                metadata: { source: "home_feed" },
-            }).catch(() => null);
-            scheduleRefresh();
+        const already = savedPlaceIds.has(id);
+        if (already) {
+            markRemoveSave({ placeId: id, place, source: "home_feed" });
+        } else {
+            markSaved({ placeId: id, place, source: "home_feed" });
         }
-    }
+    }, [markRemoveSave, markSaved, savedPlaceIds]);
+
+    const handleDismiss = useCallback((place) => {
+        const id = place.placeId ?? place.id;
+        removePlaceFromList(setPlaces, id);
+        markDismissed({ placeId: id, place, source: "home_feed" });
+    }, [markDismissed]);
+
+    const handleLike = useCallback((place) => {
+        const id = place.placeId ?? place.id;
+        if (likedPlaceIds.has(id)) return;
+        markLiked({ placeId: id, place, source: "home_feed" });
+    }, [likedPlaceIds, markLiked]);
+
+    const handleDislike = useCallback((place) => {
+        const id = place.placeId ?? place.id;
+        if (dislikedPlaceIds.has(id)) return;
+
+        const name = place?.name?.trim() || "This place";
+        const typeHint = place?.type
+            ? `${place.type.replace(/_/g, " ")} places`
+            : "similar places";
+
+        Alert.alert(
+            "Not for me",
+            `${name} and ${typeHint} like it won't be recommended again.\n\nPull down or tap ↻ anytime to refresh your feed.`,
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Don't recommend",
+                    style: "destructive",
+                    onPress: () => {
+                        removePlaceFromList(setPlaces, id);
+                        markDisliked({ placeId: id, place, source: "home_feed" });
+                    },
+                },
+            ],
+        );
+    }, [dislikedPlaceIds, markDisliked]);
+
+    const renderFeedItem = useCallback(({ item }) => {
+        const id = item.placeId ?? item.id;
+        return (
+            <PlaceCard
+                place={item}
+                onPress={() => handleOpenDetail(item)}
+                onPressIn={() => prefetchPlaceDetails(id)}
+                liked={likedPlaceIds.has(id)}
+                saved={savedPlaceIds.has(id)}
+                disliked={dislikedPlaceIds.has(id)}
+                onLike={() => handleLike(item)}
+                onSave={() => handleSave(item)}
+                onDislike={() => handleDislike(item)}
+                onDismiss={() => handleDismiss(item)}
+            />
+        );
+    }, [
+        dislikedPlaceIds,
+        handleDislike,
+        handleDismiss,
+        handleLike,
+        handleOpenDetail,
+        handleSave,
+        likedPlaceIds,
+        savedPlaceIds,
+    ]);
 
     function openNotificationCenter() {
         setNotifPanelOpen(true);
@@ -418,6 +483,8 @@ export default function HomeScreen({ navigation }) {
                     eyebrow="Personalized picks"
                     title={greetingMeta.greeting}
                     subtitle={greetingMeta.headline}
+                    onRefresh={handleRefresh}
+                    refreshing={refreshing}
                     onAction={openNotificationCenter}
                     actionBadgeCount={inboxUnreadCount}
                 />
@@ -632,20 +699,7 @@ export default function HomeScreen({ navigation }) {
                         windowSize={6}
                         removeClippedSubviews
                         contentContainerStyle={styles.listContent}
-                        renderItem={({ item }) => (
-                            <PlaceCard
-                                place={item}
-                                onPress={() => handleOpenDetail(item)}
-                                onPressIn={() =>
-                                    prefetchPlaceDetails(item.placeId ?? item.id)
-                                }
-                                liked={likedPlaceIds.has(item.placeId ?? item.id)}
-                                saved={savedPlaceIds.has(item.placeId ?? item.id)}
-                                onLike={() => handleLike(item)}
-                                onSave={() => handleSave(item)}
-                                onDismiss={() => handleDismiss(item)}
-                            />
-                        )}
+                        renderItem={renderFeedItem}
                     />
                 )}
             </LinearGradient>
@@ -700,7 +754,7 @@ function createStyles(palette, isDark) {
             borderRadius: 999,
         },
         listContent: {
-            paddingBottom: 20,
+            paddingBottom: 110,
         },
         aiStatusBar: {
             marginBottom: 10,

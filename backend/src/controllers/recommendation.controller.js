@@ -13,6 +13,8 @@
  *   ?fast=true        — Phase 15: fallback mode — skip embedding cosine-similarity
  *                       and AI model scoring for lower latency.  Results are cached
  *                       under a separate key from full-mode responses.
+ *   ?refresh=true     — Bypass recommendation cache, reload profile + interactions
+ *                       from Firestore, and rotate recently shown places to the back.
  *
  * When lat + lng are supplied and GOOGLE_MAPS_API_KEY is configured, the engine
  * fetches real nearby places from Google Maps instead of the static Firestore
@@ -89,6 +91,8 @@ export const getRecommendationsHandler = async (req, res, next) => {
       ? rawMode.toLowerCase()
       : null;
 
+    const forceRefresh = req.query.refresh === "true" || req.query.refresh === "1";
+
     const { recommendations, meta } = await getRecommendations(
       req.user.uid,
       debug,
@@ -97,7 +101,8 @@ export const getRecommendationsHandler = async (req, res, next) => {
       fastMode,
       legacyTypeFilter,
       modeFilter,
-      discoverKey
+      discoverKey,
+      forceRefresh,
     );
 
     return res.status(200).json({

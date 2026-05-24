@@ -33,6 +33,16 @@
  *     embedding          {object}         — { [dimension]: float 0-1 } long-term taste vector (v9)
  *     (Phase 13) typeAffinity updates use repeat reinforcement + global scale-down
  *                when the map magnitude grows too large.
+ *
+ *   v18 — Persistent per-place negative memory (so the AI never forgets a no):
+ *     dislikedPlaceIds       {string[]}   — places the user explicitly disliked (hard block)
+ *     dismissedPlaceIds      {string[]}   — places the user swiped away (strong penalty)
+ *     notInterestedPlaceIds  {string[]}   — places marked "not for me" (hard block, permanent)
+ *     savedPlaceIds          {string[]}   — places the user saved (fast retrieval + pinning)
+ *
+ *   Each is a capped FIFO ring buffer (NEGATIVE_MEMORY_CAP / SAVED_MEMORY_CAP entries).
+ *   A complementary positive action (like, save) removes a place from the corresponding
+ *   negative set so the user's most recent intent always wins.
  */
 
 import { db } from "../config/firebase.js";
@@ -287,6 +297,28 @@ export const AFFINITY_WEIGHTS = Object.freeze({
 /** Maximum absolute value stored in typeAffinity for any single type. */
 const AFFINITY_CAP = 50;
 
+/** v18 — Persistent per-place memory caps. */
+const NEGATIVE_MEMORY_CAP = 500; // dislikedPlaceIds / dismissedPlaceIds / notInterestedPlaceIds
+const SAVED_MEMORY_CAP    = 500; // savedPlaceIds (fast retrieval + pinning)
+
+/**
+ * Adds an id to the front of a FIFO ring buffer, deduping existing entries and
+ * trimming to the supplied cap. Returns the new array (immutable update).
+ */
+const pushUniqueCapped = (list, id, cap) => {
+  if (!id) return Array.isArray(list) ? list : [];
+  const arr = Array.isArray(list) ? list : [];
+  if (arr[0] === id) return arr;
+  return [id, ...arr.filter((x) => x !== id)].slice(0, cap);
+};
+
+/** Removes an id from a list (returns same reference when not present). */
+const removeFromList = (list, id) => {
+  if (!id || !Array.isArray(list) || list.length === 0) return Array.isArray(list) ? list : [];
+  if (!list.includes(id)) return list;
+  return list.filter((x) => x !== id);
+};
+
 /**
  * When the largest |typeAffinity| across all types exceeds this value, the
  * entire map is scaled down proportionally (Phase 13 — prevents slow drift explosion).
@@ -366,7 +398,6 @@ const rescaleAffinityMapIfNeeded = (map) => {
 export const updateUserIntelligence = async (uid, placeType, placeId, actionType) => {
   const affinityWeight   = AFFINITY_WEIGHTS[actionType]        ?? 0;
   const embeddingDelta   = EMBEDDING_LEARNING_RATES[actionType] ?? 0;
-  if (!placeType) return;
 
   try {
     const userRef  = db.collection(USERS_COLLECTION).doc(uid);
@@ -375,48 +406,100 @@ export const updateUserIntelligence = async (uid, placeType, placeId, actionType
 
     const data         = userSnap.data();
 
-    // ── typeAffinity update ────────────────────────────────────────────────────
-    const current      = data.typeAffinity ?? {};
-    const currentValue = current[placeType] ?? 0;
-
-    // Phase 13: reinforce repeated positive engagement with this type.
-    const repeatBonus =
-      affinityWeight > 0 && currentValue > 0
-        ? Math.min(2, affinityWeight * 0.2 + Math.min(1, currentValue / 25))
-        : 0;
-
-    const delta        = affinityWeight + repeatBonus;
-    let nextMap        = { ...current, [placeType]: currentValue + delta };
-    nextMap[placeType] = Math.min(AFFINITY_CAP, Math.max(-AFFINITY_CAP, nextMap[placeType]));
-
-    nextMap = rescaleAffinityMapIfNeeded(nextMap);
-    const newValue = nextMap[placeType];
-
-    // ── seenPlaces update ──────────────────────────────────────────────────────
+    // ── seenPlaces update (always, even for Google place_ids) ────────────────
     const seen        = Array.isArray(data.seenPlaces) ? data.seenPlaces : [];
     const updatedSeen = seen[0] === placeId
       ? seen
       : [placeId, ...seen.filter((id) => id !== placeId)].slice(0, 200);
 
-    // ── embedding update (Phase 9) ─────────────────────────────────────────────
-    const prevEmbedding  = data.embedding ?? {};
-    const prevTypeValue  = prevEmbedding[placeType] ?? 0;
-    const nextTypeValue  = Math.min(1, Math.max(0, prevTypeValue + embeddingDelta));
-    const rawEmbedding   = { ...prevEmbedding, [placeType]: nextTypeValue };
-    const nextEmbedding  = normalizeEmbedding(rawEmbedding);
+    // ── v18: Persistent per-place memory sets ────────────────────────────────
+    let dislikedIds      = Array.isArray(data.dislikedPlaceIds)      ? data.dislikedPlaceIds      : [];
+    let dismissedIds     = Array.isArray(data.dismissedPlaceIds)     ? data.dismissedPlaceIds     : [];
+    let notInterestedIds = Array.isArray(data.notInterestedPlaceIds) ? data.notInterestedPlaceIds : [];
+    let savedIds         = Array.isArray(data.savedPlaceIds)         ? data.savedPlaceIds         : [];
 
-    await userRef.update({
-      typeAffinity: nextMap,
-      seenPlaces:   updatedSeen,
-      embedding:    nextEmbedding,
-      updatedAt:  new Date().toISOString(),
-    });
+    switch (actionType) {
+      case "dislike":
+        dislikedIds = pushUniqueCapped(dislikedIds, placeId, NEGATIVE_MEMORY_CAP);
+        savedIds    = removeFromList(savedIds, placeId);
+        break;
+      case "dismiss":
+        dismissedIds = pushUniqueCapped(dismissedIds, placeId, NEGATIVE_MEMORY_CAP);
+        savedIds     = removeFromList(savedIds, placeId);
+        break;
+      case "not_interested":
+        notInterestedIds = pushUniqueCapped(notInterestedIds, placeId, NEGATIVE_MEMORY_CAP);
+        savedIds     = removeFromList(savedIds, placeId);
+        dismissedIds = removeFromList(dismissedIds, placeId);
+        dislikedIds  = removeFromList(dislikedIds, placeId);
+        break;
+      case "save":
+        savedIds     = pushUniqueCapped(savedIds, placeId, SAVED_MEMORY_CAP);
+        dismissedIds = removeFromList(dismissedIds, placeId);
+        dislikedIds  = removeFromList(dislikedIds, placeId);
+        break;
+      case "remove_save":
+        savedIds = removeFromList(savedIds, placeId);
+        break;
+      case "like":
+        dislikedIds  = removeFromList(dislikedIds, placeId);
+        dismissedIds = removeFromList(dismissedIds, placeId);
+        break;
+      default:
+        break;
+    }
 
-    logger.info(
-      `[intelligence] uid=${uid} type=${placeType}` +
-      ` affinity=${currentValue}->${newValue}` +
-      ` embed=${prevTypeValue.toFixed(3)}->${nextTypeValue.toFixed(3)}`
-    );
+    const updatePayload = {
+      seenPlaces:            updatedSeen,
+      dislikedPlaceIds:      dislikedIds,
+      dismissedPlaceIds:     dismissedIds,
+      notInterestedPlaceIds: notInterestedIds,
+      savedPlaceIds:         savedIds,
+      updatedAt:             new Date().toISOString(),
+    };
+
+    // ── typeAffinity + embedding (catalogue / metadata type required) ───────
+    if (placeType) {
+      const current      = data.typeAffinity ?? {};
+      const currentValue = current[placeType] ?? 0;
+
+      const repeatBonus =
+        affinityWeight > 0 && currentValue > 0
+          ? Math.min(2, affinityWeight * 0.2 + Math.min(1, currentValue / 25))
+          : 0;
+
+      const delta        = affinityWeight + repeatBonus;
+      let nextMap        = { ...current, [placeType]: currentValue + delta };
+      nextMap[placeType] = Math.min(AFFINITY_CAP, Math.max(-AFFINITY_CAP, nextMap[placeType]));
+      nextMap = rescaleAffinityMapIfNeeded(nextMap);
+
+      const prevEmbedding  = data.embedding ?? {};
+      const prevTypeValue  = prevEmbedding[placeType] ?? 0;
+      const nextTypeValue  = Math.min(1, Math.max(0, prevTypeValue + embeddingDelta));
+      const rawEmbedding   = { ...prevEmbedding, [placeType]: nextTypeValue };
+      const nextEmbedding  = normalizeEmbedding(rawEmbedding);
+
+      Object.assign(updatePayload, {
+        typeAffinity: nextMap,
+        embedding:    nextEmbedding,
+      });
+
+      logger.info(
+        `[intelligence] uid=${uid} type=${placeType} action=${actionType}` +
+        ` affinity=${currentValue}->${nextMap[placeType]}` +
+        ` embed=${prevTypeValue.toFixed(3)}->${nextTypeValue.toFixed(3)}` +
+        ` saved=${savedIds.length} disliked=${dislikedIds.length}` +
+        ` dismissed=${dismissedIds.length} notInterested=${notInterestedIds.length}`,
+      );
+    } else {
+      logger.info(
+        `[intelligence] uid=${uid} action=${actionType} memory-only (no type)` +
+        ` saved=${savedIds.length} disliked=${dislikedIds.length}` +
+        ` dismissed=${dismissedIds.length}`,
+      );
+    }
+
+    await userRef.update(updatePayload);
   } catch (err) {
     logger.warn(`[intelligence] Failed to update intelligence for uid=${uid}:`, { error: err.message });
   }

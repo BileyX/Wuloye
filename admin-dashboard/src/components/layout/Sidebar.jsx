@@ -5,13 +5,14 @@ import {
   Brain,
   CalendarDays,
   CalendarRange,
-  ChevronDown,
+  Flame,
   FlaskConical,
   MapPin,
   MessageSquareText,
   Settings,
   Shield,
   Sparkles,
+  Star,
   Users,
   Wrench,
   X,
@@ -38,8 +39,10 @@ const navGroups = [
   {
     label: "AI & ML",
     items: [
-      { to: "/ai-model",    label: "AI Monitor",  icon: Brain },
-      { to: "/experiments", label: "Experiments", icon: FlaskConical },
+      { to: "/ai-model",               label: "AI Monitor",       icon: Brain },
+      { to: "/experiments",            label: "Experiments",      icon: FlaskConical },
+      { to: "/recommendation-control", label: "AI Rec. Control",  icon: Star },
+      { to: "/trending-management",    label: "Trending Control",  icon: Flame },
     ],
   },
   {

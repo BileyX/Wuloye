@@ -1,7 +1,9 @@
 import apiClient from "./client";
 
-export async function getProfile() {
-    const { data } = await apiClient.get("/profile");
+export async function getProfile(options = {}) {
+    const { timeout } = options;
+    const config = typeof timeout === "number" ? { timeout } : undefined;
+    const { data } = await apiClient.get("/profile", config);
     return data;
 }
 

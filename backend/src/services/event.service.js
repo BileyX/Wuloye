@@ -389,6 +389,71 @@ export const getEventCandidates = async (limit = 80) => {
 // ─── Write helpers (admin use) ────────────────────────────────────────────────
 
 /**
+ * Create a new event document (admin use).
+ *
+ * @param {object} data — event fields
+ * @returns {Promise<object>} The created event doc with its Firestore id.
+ */
+export const createEvent = async (data) => {
+  const {
+    title, description = "", location = "", category = "other",
+    date, end_date, image = "", gallery = [], source_url = "",
+    booking_url = "", organizer = "", contact = "",
+    is_paid = false, ticket_price = "", price_tier = "cheap",
+    city = "", coordinates = null,
+    is_featured = false, trending = false, aiBoostScore = 0, adminPriority = 50,
+    audience = [], budgetLevel = "all", eventType = "",
+    recurring = false, expiryDate = null,
+    tags = [], keywords = [],
+  } = data;
+
+  if (!title) throw new Error("title is required");
+  const validCats = new Set([...VALID_CATEGORIES, "festival", "nightlife"]);
+  const finalCat = validCats.has(category) ? category : "other";
+
+  const docRef = db.collection(EVENTS_COLLECTION).doc();
+  const now = new Date().toISOString();
+  const doc = {
+    id: docRef.id,
+    title: String(title).trim(),
+    description: String(description).trim(),
+    location: String(location).trim(),
+    city: String(city).trim(),
+    coordinates: coordinates ?? null,
+    category: finalCat,
+    tags: Array.isArray(tags) ? tags : [],
+    keywords: Array.isArray(keywords) ? keywords : [],
+    date: date || now,
+    end_date: end_date ?? null,
+    image: String(image).trim(),
+    gallery: Array.isArray(gallery) ? gallery : [],
+    source_url: String(source_url).trim(),
+    booking_url: String(booking_url).trim(),
+    organizer: String(organizer).trim(),
+    contact: String(contact).trim(),
+    is_paid: Boolean(is_paid),
+    ticket_price: String(ticket_price).trim(),
+    price_tier: ["cheap", "affordable", "expensive"].includes(price_tier) ? price_tier : "cheap",
+    is_featured: Boolean(is_featured),
+    trending: Boolean(trending),
+    aiBoostScore: Math.min(100, Math.max(0, Number(aiBoostScore) || 0)),
+    adminPriority: Math.min(100, Math.max(0, Number(adminPriority) || 50)),
+    audience: Array.isArray(audience) ? audience : [],
+    budgetLevel: String(budgetLevel).trim(),
+    eventType: String(eventType).trim(),
+    recurring: Boolean(recurring),
+    expiryDate: expiryDate ?? null,
+    source: "admin_created",
+    created_at: now,
+    updatedAt: now,
+  };
+
+  await docRef.set(doc);
+  invalidateEventsCache();
+  return doc;
+};
+
+/**
  * Update a single event document (admin edit).
  *
  * @param {string} eventId
