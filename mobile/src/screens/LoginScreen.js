@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
     Animated,
     Alert,
     Image,
+    Keyboard,
     KeyboardAvoidingView,
     Platform,
     Pressable,
@@ -11,6 +12,7 @@ import {
     Text,
     TextInput,
     View,
+    findNodeHandle,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
@@ -20,9 +22,6 @@ import { useAuth } from "../context/AuthContext";
 import { GOOGLE_WEB_CLIENT_ID } from "../utils/constants";
 import { getApiErrorMessage } from "../utils/api";
 import { useAppTheme } from "../context/ThemeContext";
-
-/** Same rules as ProfileSetupScreen — public handle, not a legal name. */
-const USERNAME_REGEX = /^[a-z][a-z0-9_]{2,19}$/;
 
 function AuthButton({
     label,
@@ -163,6 +162,8 @@ export default function LoginScreen() {
         () => createStyles(palette, isDark),
         [palette, isDark],
     );
+    const baseScrollPadding = 32;
+    const focusGap = 320;
 
     const {
         signInWithEmail,
@@ -173,11 +174,15 @@ export default function LoginScreen() {
 
     const [isSignUp, setIsSignUp] = useState(false);
     const [email, setEmail] = useState("");
-    const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [submitting, setSubmitting] = useState(false);
+    const [keyboardOffset, setKeyboardOffset] = useState(0);
     const heroFloat = useState(new Animated.Value(0))[0];
+    const scrollRef = useRef(null);
+    const emailRef = useRef(null);
+    const passwordRef = useRef(null);
+    const confirmPasswordRef = useRef(null);
 
     useEffect(() => {
         Animated.loop(
@@ -196,6 +201,41 @@ export default function LoginScreen() {
         ).start();
     }, [heroFloat]);
 
+    useEffect(() => {
+        const showEvent =
+            Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+        const hideEvent =
+            Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+
+        const showSub = Keyboard.addListener(showEvent, (event) => {
+            setKeyboardOffset(event?.endCoordinates?.height ?? 0);
+        });
+        const hideSub = Keyboard.addListener(hideEvent, () => {
+            setKeyboardOffset(0);
+        });
+
+        return () => {
+            showSub.remove();
+            hideSub.remove();
+        };
+    }, []);
+
+    function scrollToInput(ref) {
+        if (!ref?.current || !scrollRef.current) {
+            return;
+        }
+        const node = findNodeHandle(ref.current);
+        const responder = scrollRef.current.getScrollResponder?.();
+        if (!node || !responder?.scrollResponderScrollNativeHandleToKeyboard) {
+            return;
+        }
+        responder.scrollResponderScrollNativeHandleToKeyboard(
+            node,
+            focusGap,
+            true,
+        );
+    }
+
     async function submitEmailAuth() {
         const trimmedEmail = email.trim();
         if (!trimmedEmail || !password) {
@@ -204,18 +244,6 @@ export default function LoginScreen() {
         }
 
         if (isSignUp) {
-            const rawUser = username.trim().toLowerCase();
-            if (!rawUser) {
-                Alert.alert("Missing username", "Choose a username to continue.");
-                return;
-            }
-            if (!USERNAME_REGEX.test(rawUser)) {
-                Alert.alert(
-                    "Invalid username",
-                    "Use 3–20 characters: start with a letter, then letters, numbers, or underscores (a–z, 0–9, _).",
-                );
-                return;
-            }
             if (password !== confirmPassword) {
                 Alert.alert("Passwords", "Passwords do not match.");
                 return;
@@ -232,11 +260,7 @@ export default function LoginScreen() {
         try {
             setSubmitting(true);
             if (isSignUp) {
-                await signUpWithEmail(
-                    trimmedEmail,
-                    password,
-                    username.trim().toLowerCase(),
-                );
+                await signUpWithEmail(trimmedEmail, password);
             } else {
                 await signInWithEmail(trimmedEmail, password);
             }
@@ -246,9 +270,7 @@ export default function LoginScreen() {
                 : "Invalid email or password.";
             Alert.alert(
                 isSignUp ? "Sign up failed" : "Sign in failed",
-                error?.code === "username_taken"
-                    ? error.message
-                    : getApiErrorMessage(error, fallback),
+                getApiErrorMessage(error, fallback),
             );
         } finally {
             setSubmitting(false);
@@ -281,11 +303,23 @@ export default function LoginScreen() {
             >
                 <KeyboardAvoidingView
                     style={styles.flex}
-                    behavior={Platform.OS === "ios" ? "padding" : undefined}
+                    behavior={Platform.OS === "ios" ? "padding" : "height"}
+                    keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
                 >
                     <ScrollView
+                        ref={scrollRef}
                         keyboardShouldPersistTaps="handled"
-                        contentContainerStyle={styles.scrollContent}
+                        keyboardDismissMode={
+                            Platform.OS === "ios" ? "interactive" : "on-drag"
+                        }
+                        automaticallyAdjustKeyboardInsets
+                        contentContainerStyle={[
+                            styles.scrollContent,
+                            {
+                                paddingBottom:
+                                    baseScrollPadding + keyboardOffset + 140,
+                            },
+                        ]}
                         showsVerticalScrollIndicator={false}
                     >
                         <View style={styles.heroGlowA} />
@@ -364,35 +398,9 @@ export default function LoginScreen() {
                         </View>
 
                         <View style={styles.emailBlock}>
-                            {isSignUp ? (
-                                <>
-                                    <Text style={styles.fieldLabel}>
-                                        Username
-                                    </Text>
-                                    <Text style={styles.fieldHint}>
-                                        A public handle only — not your real name.
-                                    </Text>
-                                    <View style={styles.usernameInputRow}>
-                                        <Text style={styles.usernameAt}>@</Text>
-                                        <TextInput
-                                            value={username}
-                                            onChangeText={(t) =>
-                                                setUsername(
-                                                    t.toLowerCase().replace(/\s/g, ""),
-                                                )
-                                            }
-                                            style={styles.usernameFieldInput}
-                                            placeholder="your_username"
-                                            placeholderTextColor={palette.textMuted}
-                                            autoCapitalize="none"
-                                            autoCorrect={false}
-                                            textContentType="username"
-                                        />
-                                    </View>
-                                </>
-                            ) : null}
                             <Text style={styles.fieldLabel}>Email</Text>
                             <TextInput
+                                ref={emailRef}
                                 value={email}
                                 onChangeText={setEmail}
                                 style={styles.fieldInput}
@@ -402,9 +410,19 @@ export default function LoginScreen() {
                                 autoCorrect={false}
                                 keyboardType="email-address"
                                 textContentType="emailAddress"
+                                onFocus={() => scrollToInput(emailRef)}
+                                returnKeyType="next"
+                                onSubmitEditing={() => {
+                                    if (isSignUp) {
+                                        passwordRef.current?.focus();
+                                        return;
+                                    }
+                                    passwordRef.current?.focus();
+                                }}
                             />
                             <Text style={styles.fieldLabel}>Password</Text>
                             <TextInput
+                                ref={passwordRef}
                                 value={password}
                                 onChangeText={setPassword}
                                 style={styles.fieldInput}
@@ -418,6 +436,15 @@ export default function LoginScreen() {
                                 textContentType={
                                     isSignUp ? "newPassword" : "password"
                                 }
+                                onFocus={() => scrollToInput(passwordRef)}
+                                returnKeyType={isSignUp ? "next" : "go"}
+                                onSubmitEditing={() => {
+                                    if (isSignUp) {
+                                        confirmPasswordRef.current?.focus();
+                                        return;
+                                    }
+                                    submitEmailAuth();
+                                }}
                             />
                             {isSignUp ? (
                                 <>
@@ -425,6 +452,7 @@ export default function LoginScreen() {
                                         Confirm password
                                     </Text>
                                     <TextInput
+                                        ref={confirmPasswordRef}
                                         value={confirmPassword}
                                         onChangeText={setConfirmPassword}
                                         style={styles.fieldInput}
@@ -432,6 +460,11 @@ export default function LoginScreen() {
                                         placeholderTextColor={palette.textMuted}
                                         secureTextEntry
                                         textContentType="newPassword"
+                                        onFocus={() =>
+                                            scrollToInput(confirmPasswordRef)
+                                        }
+                                        returnKeyType="go"
+                                        onSubmitEditing={submitEmailAuth}
                                     />
                                 </>
                             ) : null}
@@ -459,7 +492,6 @@ export default function LoginScreen() {
                             onPress={() => {
                                 setIsSignUp((v) => !v);
                                 setConfirmPassword("");
-                                setUsername("");
                             }}
                             style={styles.toggleRow}
                         >
@@ -494,7 +526,6 @@ function createStyles(palette, isDark) {
         scrollContent: {
             paddingHorizontal: 22,
             paddingTop: 18,
-            paddingBottom: 32,
         },
         hintText: {
             marginTop: 12,
