@@ -32,6 +32,7 @@ import {
 import { getApiErrorMessage } from "../utils/api";
 import PlaceListSkeleton from "../components/PlaceListSkeleton";
 import DiscoverCard from "../components/DiscoverCard";
+import FloatingChatButton from "../components/FloatingChatButton";
 import useLocation from "../hooks/useLocation";
 import { useRecommendationsFeed } from "../hooks/useRecommendationsFeed";
 import {
@@ -966,6 +967,7 @@ export default function DiscoverScreen({ navigation, route }) {
                     />
                 ) : null}
             </LinearGradient>
+            <FloatingChatButton bottom={110} right={18} />
         </SafeAreaView>
     );
 }

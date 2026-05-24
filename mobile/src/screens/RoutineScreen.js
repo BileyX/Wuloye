@@ -24,6 +24,7 @@ import Loader from "../components/Loader";
 import EmptyState from "../components/EmptyState";
 import TopGreetingBanner from "../components/TopGreetingBanner";
 import PlaceCard from "../components/PlaceCard";
+import FloatingChatButton from "../components/FloatingChatButton";
 
 import { createRoutine, deleteRoutine, getRoutines } from "../api/routineApi";
 import { getProfile } from "../api/profileApi";
@@ -1172,6 +1173,7 @@ export default function RoutineScreen() {
                     </View>
                 </Modal>
             </LinearGradient>
+            <FloatingChatButton bottom={110} right={18} />
         </SafeAreaView>
     );
 }

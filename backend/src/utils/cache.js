@@ -141,3 +141,16 @@ export function invalidateUserRecommendationCaches(userId) {
   profileDataCache.delete(`pd:${userId}`);
   derivedSignalsCache.deleteByPrefix(`ds:${userId}:`);
 }
+
+/**
+ * Per-user saved-places list cache.
+ * Key format: `sp:<userId>`
+ * TTL: 3 minutes — invalidated immediately on save / remove_save.
+ * Max: 500 entries.
+ */
+export const savedPlacesCache = new TtlCache(3 * 60 * 1000, 500);
+
+/** @param {string} userId */
+export function invalidateSavedPlacesCache(userId) {
+  savedPlacesCache.delete(`sp:${userId}`);
+}

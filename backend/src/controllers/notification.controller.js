@@ -16,7 +16,10 @@ import {
     logNotificationInteraction,
     getNotificationHistory,
 } from "../services/notification.service.js";
-import { logger } from "../utils/logger.js";
+import {
+    registerDeviceToken,
+    deactivateDeviceToken,
+} from "../services/pushToken.service.js";
 
 // ─── GET /api/notifications/preferences ──────────────────────────────────────
 
@@ -112,6 +115,75 @@ export async function getHistory(req, res, next) {
 
         const history = await getNotificationHistory(uid, limit);
         res.json({ success: true, data: history });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// ─── POST /api/notifications/device-token ────────────────────────────────────
+
+export async function postDeviceToken(req, res, next) {
+    try {
+        const { uid } = req.user;
+        const { expoPushToken, platform, deviceName, appVersion } = req.body;
+
+        if (!expoPushToken) {
+            return res.status(400).json({
+                success: false,
+                data: null,
+                message: "expoPushToken is required",
+            });
+        }
+
+        const doc = await registerDeviceToken(uid, {
+            expoPushToken,
+            platform,
+            deviceName,
+            appVersion,
+        });
+
+        res.json({ success: true, data: doc });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// ─── DELETE /api/notifications/device-token ──────────────────────────────────
+
+export async function deleteDeviceToken(req, res, next) {
+    try {
+        const { uid } = req.user;
+        const { expoPushToken } = req.body;
+
+        if (!expoPushToken) {
+            return res.status(400).json({
+                success: false,
+                data: null,
+                message: "expoPushToken is required",
+            });
+        }
+
+        await deactivateDeviceToken(uid, expoPushToken);
+        res.json({ success: true, data: { removed: true } });
+    } catch (err) {
+        next(err);
+    }
+}
+
+// ─── GET /api/notifications/device-status ────────────────────────────────────
+
+export async function getDeviceStatus(req, res, next) {
+    try {
+        const { uid } = req.user;
+        const { getTokensForUser } = await import("../services/pushToken.service.js");
+        const tokens = await getTokensForUser(uid);
+        res.json({
+            success: true,
+            data: {
+                registered: tokens.length > 0,
+                deviceCount: tokens.length,
+            },
+        });
     } catch (err) {
         next(err);
     }

@@ -27,6 +27,7 @@ export const endpoints = {
   adminOnboardingInsights: "/admin/analytics/onboarding",
   adminAiInsights: "/admin/ai/insights",
   adminNotifications: "/admin/notifications",
+  adminNotificationStats: "/admin/notifications/stats",
   adminRecommendationControl: "/admin/recommendation-control",
   adminRecommendationAnalytics: "/admin/recommendation-analytics",
   adminTrending: "/admin/trending",
@@ -237,18 +238,35 @@ export async function sendAdminNotification(data) {
   return response.data;
 }
 
-/** Alias used by NotificationsAdminPage — maps {title, body, severity} → backend {title, message, type}. */
-export async function postAdminAnnouncement({ title, body, severity }) {
+/** Compose and broadcast push announcement to registered devices. */
+export async function postAdminAnnouncement({
+  title,
+  body,
+  severity,
+  deepLink,
+  subtitle,
+  imageUrl,
+  targeting,
+}) {
   const response = await apiClient.post(endpoints.adminNotifications, {
     title,
     message: body,
     type: severity ?? "announcement",
+    deepLink: deepLink || "wuloye://home",
+    subtitle: subtitle || "",
+    imageUrl: imageUrl || null,
+    targeting: targeting || null,
   });
   return response.data;
 }
 
 export async function getAdminNotifications() {
   const response = await apiClient.get(endpoints.adminNotifications);
+  return response.data;
+}
+
+export async function getAdminNotificationStats() {
+  const response = await apiClient.get(endpoints.adminNotificationStats);
   return response.data;
 }
 

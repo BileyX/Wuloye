@@ -20,6 +20,7 @@ import adminRouter from "./routes/admin.routes.js";
 import aiRouter from "./routes/ai.routes.js";
 import notificationRouter from "./routes/notification.routes.js";
 import reminderRouter from "./routes/reminder.routes.js";
+import chatRouter from "./routes/chat.routes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
 import { initModelCache } from "./services/ai/modelService.js";
 import { logger } from "./utils/logger.js";
@@ -106,6 +107,9 @@ app.use("/api/notifications", notificationRouter);
 
 // User-created custom reminders (sync + metadata)
 app.use("/api/reminders", reminderRouter);
+
+// AI chat assistant — conversational recommendations under /api/chat
+app.use("/api/chat", chatRouter);
 
 // Dev routes — seeding and inspection tools, only active outside production
 if (process.env.NODE_ENV !== "production") {

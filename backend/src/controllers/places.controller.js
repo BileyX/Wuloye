@@ -14,11 +14,17 @@ import {
   getPlaceDetails,
   fetchPlacePhotoBuffer,
 } from "../services/googlePlaces.service.js";
-import { getPlaceById }                         from "../services/place.service.js";
+import {
+  getPlaceById,
+  getPlacesByIds,
+} from "../services/place.service.js";
 import { getUserById }                          from "../services/user.service.js";
 import { getInteractionsByUser }                from "../services/interaction.service.js";
 import { logger }                               from "../utils/logger.js";
 import { buildPlacePhotoPaths }                from "../utils/placePhotoPaths.js";
+import {
+  savedPlacesCache,
+} from "../utils/cache.js";
 
 const INTERACTION_TYPE_SAVE = "save";
 
@@ -82,6 +88,47 @@ export const getPlaceHandler = async (req, res, next) => {
  *     meta:   { count, source: "user_profile" | "interaction_replay" }
  *   }
  */
+function buildSaveMetaFromInteractions(interactions) {
+  const savesByPlace = new Map();
+  for (const ix of interactions) {
+    const pid = ix?.placeId;
+    if (!pid || ix.actionType !== INTERACTION_TYPE_SAVE) continue;
+    if (!savesByPlace.has(pid)) {
+      savesByPlace.set(pid, {
+        savedAt:  ix.createdAt ?? null,
+        snapshot: ix.metadata?.place ?? null,
+      });
+    }
+  }
+  return savesByPlace;
+}
+
+function resolveSavedPlace(pid, catalogueDoc, meta) {
+  const base = catalogueDoc ?? meta?.snapshot ?? null;
+  if (!base) {
+    return {
+      placeId: pid,
+      id:      pid,
+      name:    "Saved place",
+      type:    "place",
+      savedAt: meta?.savedAt ?? null,
+      source:  "stub",
+    };
+  }
+  const refs = base.photoReferences ?? [];
+  const images = Array.isArray(base.images) && base.images.length
+    ? base.images.slice(0, 3)
+    : (catalogueDoc ? buildPlacePhotoPaths(pid, refs, 400, 3) : []);
+  return {
+    ...base,
+    id:      base.id ?? pid,
+    placeId: pid,
+    images,
+    savedAt: meta?.savedAt ?? null,
+    source:  catalogueDoc ? "catalogue" : "interaction_snapshot",
+  };
+}
+
 export const getSavedPlacesHandler = async (req, res, next) => {
   try {
     const uid = req.user?.uid;
@@ -89,82 +136,60 @@ export const getSavedPlacesHandler = async (req, res, next) => {
       return res.status(401).json({ status: "error", message: "Unauthorized" });
     }
 
+    const cacheKey = `sp:${uid}`;
+    const cached = savedPlacesCache.get(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
     const user = await getUserById(uid);
     const persistedIds = Array.isArray(user?.savedPlaceIds) ? user.savedPlaceIds : [];
 
-    // Pull recent save/remove interactions so we can attach savedAt + a place
-    // snapshot for ids that aren't in the catalogue (Google live results, etc.)
-    const recentInteractions = await getInteractionsByUser(uid, 200);
-    const savesByPlace = new Map();
-    for (const ix of recentInteractions) {
-      const pid = ix?.placeId;
-      if (!pid) continue;
-      if (ix.actionType === INTERACTION_TYPE_SAVE) {
-        if (!savesByPlace.has(pid)) {
-          savesByPlace.set(pid, {
-            savedAt:  ix.createdAt ?? null,
-            snapshot: ix.metadata?.place ?? null,
-          });
-        }
-      }
-    }
-
-    // The persistent savedPlaceIds list on the user doc is the authoritative
-    // source — if it's empty (older accounts before v18) fall back to the
-    // interaction replay so the user still sees their old saves.
-    const effectiveIds = persistedIds.length > 0
-      ? persistedIds
-      : Array.from(savesByPlace.keys());
+    let effectiveIds = persistedIds;
+    let source = persistedIds.length > 0 ? "user_profile" : "interaction_replay";
+    let savesByPlace = new Map();
 
     if (effectiveIds.length === 0) {
-      return res.json({
+      const recentInteractions = await getInteractionsByUser(uid, 100);
+      savesByPlace = buildSaveMetaFromInteractions(recentInteractions);
+      effectiveIds = Array.from(savesByPlace.keys());
+    }
+
+    if (effectiveIds.length === 0) {
+      const emptyPayload = {
         status: "ok",
         data:   [],
         meta:   { count: 0, source: "empty" },
-      });
+      };
+      savedPlacesCache.set(cacheKey, emptyPayload);
+      return res.json(emptyPayload);
     }
 
-    // Resolve each id against the live catalogue in parallel, falling back to
-    // the snapshot stored in the save metadata when the catalogue doesn't
-    // have the place (e.g. Google Maps live places that were never seeded).
-    const resolved = await Promise.all(
-      effectiveIds.map(async (pid) => {
-        const meta = savesByPlace.get(pid) ?? {};
-        const catalogueDoc = await getPlaceById(pid).catch(() => null);
-        const base = catalogueDoc ?? meta.snapshot ?? null;
-        if (!base) {
-          return {
-            placeId: pid,
-            id:      pid,
-            name:    "Saved place",
-            type:    "place",
-            savedAt: meta.savedAt ?? null,
-            source:  "stub",
-          };
-        }
-        const refs = base.photoReferences ?? [];
-        const images = Array.isArray(base.images) && base.images.length
-          ? base.images.slice(0, 5)
-          : (catalogueDoc ? buildPlacePhotoPaths(pid, refs, 400, 5) : []);
-        return {
-          ...base,
-          id:      base.id ?? pid,
-          placeId: pid,
-          images,
-          savedAt: meta.savedAt ?? null,
-          source:  catalogueDoc ? "catalogue" : "interaction_snapshot",
-        };
-      }),
-    );
+    const catalogueMap = await getPlacesByIds(effectiveIds);
+    const missingFromCatalogue = effectiveIds.filter((pid) => !catalogueMap.has(pid));
 
-    return res.json({
+    if (missingFromCatalogue.length > 0 && savesByPlace.size === 0) {
+      const recentInteractions = await getInteractionsByUser(uid, 100);
+      savesByPlace = buildSaveMetaFromInteractions(recentInteractions);
+    }
+
+    const resolved = effectiveIds.map((pid) => {
+      const meta = savesByPlace.get(pid) ?? {};
+      const catalogueDoc = catalogueMap.get(pid) ?? null;
+      return resolveSavedPlace(pid, catalogueDoc, meta);
+    });
+
+    const payload = {
       status: "ok",
       data:   resolved,
       meta: {
         count:  resolved.length,
-        source: persistedIds.length > 0 ? "user_profile" : "interaction_replay",
+        source,
       },
-    });
+    };
+
+    savedPlacesCache.set(cacheKey, payload);
+    return res.json(payload);
   } catch (err) {
     logger.error("[places] getSavedPlacesHandler error:", { message: err.message });
     next(err);

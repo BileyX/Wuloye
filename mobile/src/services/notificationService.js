@@ -12,6 +12,7 @@
 
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
+import Constants from "expo-constants";
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { apiClient } from "../api/client";
@@ -30,7 +31,10 @@ const STORAGE_KEYS = {
     DYNAMIC_COUNT_DATE: "@wuloye/dynamic_count_date",
     SHOWN_PERMISSION_SCREEN: "@wuloye/shown_notification_permission_screen",
     INBOX: "@wuloye/notification_inbox",
+    PUSH_TOKEN: "@wuloye/expo_push_token",
 };
+
+const DAILY_NOTIFICATION_TYPES = new Set(["morning", "afternoon", "evening"]);
 
 const INBOX_MAX = 50;
 
@@ -192,6 +196,104 @@ export async function getStoredPermissionStatus() {
     return AsyncStorage.getItem(STORAGE_KEYS.PERMISSION_STATUS);
 }
 
+/** Sync permission status from the OS (not just AsyncStorage cache). */
+export async function syncPermissionStatusFromOS() {
+    const { status } = await Notifications.getPermissionsAsync();
+    await AsyncStorage.setItem(STORAGE_KEYS.PERMISSION_STATUS, status);
+    return status;
+}
+
+// ─── Expo push token registration ────────────────────────────────────────────
+
+function getExpoProjectId() {
+    return (
+        Constants.expoConfig?.extra?.eas?.projectId ??
+        Constants.easConfig?.projectId ??
+        null
+    );
+}
+
+/**
+ * Registers this device's Expo push token with the backend.
+ * Call after permission is granted and user is authenticated.
+ */
+export async function registerExpoPushToken() {
+    if (!Device.isDevice) {
+        console.warn("[Notifications] Push token skipped — not a physical device");
+        return null;
+    }
+
+    // Android remote push requires google-services.json + native rebuild (FCM).
+    // Local reminders/schedules work without it; skip until FCM is configured.
+    if (Platform.OS === "android") {
+        return null;
+    }
+
+    const { status } = await Notifications.getPermissionsAsync();
+    if (status !== "granted") return null;
+
+    const projectId = getExpoProjectId();
+    if (!projectId) {
+        console.warn("[Notifications] Missing EAS projectId — cannot get push token");
+        return null;
+    }
+
+    try {
+        const tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
+        const expoPushToken = tokenData.data;
+
+        await apiClient.post("/notifications/device-token", {
+            expoPushToken,
+            platform: Platform.OS,
+            deviceName: Device.deviceName ?? "",
+            appVersion: Constants.expoConfig?.version ?? "",
+        });
+
+        await AsyncStorage.setItem(STORAGE_KEYS.PUSH_TOKEN, expoPushToken);
+        console.log("[Notifications] Push token registered:", expoPushToken.slice(0, 30) + "...");
+        return expoPushToken;
+    } catch (err) {
+        const msg = err?.message ?? String(err);
+        if (
+            msg.includes("FirebaseApp is not initialized") ||
+            msg.includes("FCM credentials")
+        ) {
+            console.warn(
+                "[Notifications] Remote push unavailable — Android needs google-services.json + dev client rebuild.\n" +
+                "  1. Firebase Console → Project wuloye → Add Android app (com.wuloye.mobile)\n" +
+                "  2. Download google-services.json → Wuloye-/mobile/google-services.json\n" +
+                "  3. Rebuild: npx expo prebuild --clean && npx expo run:android\n" +
+                "  Local reminders still work; admin dashboard push requires this step.",
+            );
+        } else {
+            console.warn("[Notifications] Push token registration failed:", msg);
+        }
+        return null;
+    }
+}
+
+/** Remove push token from backend on logout. */
+export async function unregisterExpoPushToken() {
+    const token = await AsyncStorage.getItem(STORAGE_KEYS.PUSH_TOKEN);
+    if (!token) return;
+    try {
+        await apiClient.delete("/notifications/device-token", {
+            data: { expoPushToken: token },
+        });
+    } catch {
+        // Offline-tolerant
+    }
+    await AsyncStorage.removeItem(STORAGE_KEYS.PUSH_TOKEN);
+}
+
+/** Subscribe to Expo token refresh events. Returns cleanup function. */
+export function subscribePushTokenRefresh(onRefresh) {
+    const sub = Notifications.addPushTokenListener(({ data }) => {
+        if (data) onRefresh(data);
+    });
+    return () => sub.remove();
+}
+
 // ─── Preference helpers ───────────────────────────────────────────────────────
 
 /**
@@ -279,7 +381,21 @@ function subtractMinutes(timeStr, mins) {
 
 // ─── Scheduling ───────────────────────────────────────────────────────────────
 
-/** Cancel all previously scheduled Wuloye notifications. */
+/** Cancel only daily briefing schedules — preserves custom reminders. */
+export async function cancelDailyScheduledNotifications() {
+    const all = await Notifications.getAllScheduledNotificationsAsync();
+    await Promise.all(
+        all
+            .filter((n) =>
+                DAILY_NOTIFICATION_TYPES.has(n.content?.data?.type),
+            )
+            .map((n) =>
+                Notifications.cancelScheduledNotificationAsync(n.identifier),
+            ),
+    );
+}
+
+/** @deprecated Prefer cancelDailyScheduledNotifications to preserve reminders. */
 export async function cancelAllScheduled() {
     await Notifications.cancelAllScheduledNotificationsAsync();
 }
@@ -292,7 +408,7 @@ export async function cancelAllScheduled() {
  * @param {object} content — { morning, afternoon, evening } each with { title, body, data }
  */
 export async function scheduleDailyNotifications(prefs, content) {
-    await cancelAllScheduled();
+    await cancelDailyScheduledNotifications();
 
     const scheduled = [];
 
@@ -654,6 +770,14 @@ export function extractNavigationFromData(data) {
                     : deepLinkForReminderCategory(data.category);
             return parseDeepLink(link) ?? { screen: "Reminders", params: {} };
         }
+        case "announcement":
+        case "info":
+        case "warning":
+        case "maint":
+        case "maintenance":
+        case "promo":
+        case "promotional":
+            return parseDeepLink(data.deepLink) ?? { screen: "Home", params: {} };
         default:
             return { screen: "Home", params: {} };
     }
@@ -749,6 +873,10 @@ export function parseDeepLink(url) {
             return { screen: "SavedPlaces", params: {} };
         case "reminders":
             return { screen: "Reminders", params: {} };
+        case "trending":
+            return { screen: "Trending", params: {} };
+        case "profile":
+            return { screen: "Profile", params: {} };
         default:
             return { screen: "Home", params: {} };
     }

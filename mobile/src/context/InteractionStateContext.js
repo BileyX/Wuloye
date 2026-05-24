@@ -39,6 +39,12 @@ import { INTERACTION_TYPES } from "../utils/constants";
 import { unwrapApiData } from "../utils/api";
 import { clearFeedCache } from "../utils/feedCache";
 import { slimPlaceMetadata } from "../utils/placeMetadata";
+import {
+    hydrateSavedPlaces,
+    invalidateSavedPlaces,
+    optimisticAddSavedPlace,
+    optimisticRemoveSavedPlace,
+} from "../store/savedPlacesStore";
 import { useAuth } from "./AuthContext";
 
 const InteractionStateContext = createContext(null);
@@ -107,6 +113,7 @@ function rebuildSetsFromInteractions(interactions) {
 
 export function InteractionStateProvider({ children }) {
     const { user, ready } = useAuth();
+    const uid = user?.uid ?? null;
 
     const [liked,         setLiked]         = useState(() => new Set());
     const [saved,         setSaved]         = useState(() => new Set());
@@ -231,26 +238,49 @@ export function InteractionStateProvider({ children }) {
             setSaved((s) => mutSet(s, placeId, true));
             setDismissed((s) => mutSet(s, placeId, false));
             setDisliked((s) => mutSet(s, placeId, false));
+            if (uid && place) {
+                optimisticAddSavedPlace(uid, { ...place, placeId, id: placeId });
+            } else if (uid) {
+                invalidateSavedPlaces(uid);
+            }
             persistInteraction(placeId, INTERACTION_TYPES.SAVE, {
                 source,
                 place: slimPlaceMetadata(place),
             });
+            if (uid) {
+                scheduleAfterUI(() => {
+                    hydrateSavedPlaces(uid, { force: true, silent: true }).catch(
+                        () => null,
+                    );
+                });
+            }
             return true;
         },
-        [persistInteraction],
+        [persistInteraction, scheduleAfterUI, uid],
     );
 
     const markRemoveSave = useCallback(
         ({ placeId, place = null, source = "feed" }) => {
             if (!placeId) return false;
             setSaved((s) => mutSet(s, placeId, false));
+            if (uid) {
+                optimisticRemoveSavedPlace(uid, placeId);
+            }
             persistInteraction(placeId, INTERACTION_TYPES.REMOVE_SAVE, {
                 source,
                 place: slimPlaceMetadata(place),
             });
+            if (uid) {
+                scheduleAfterUI(() => {
+                    invalidateSavedPlaces(uid);
+                    hydrateSavedPlaces(uid, { force: true, silent: true }).catch(
+                        () => null,
+                    );
+                });
+            }
             return true;
         },
-        [persistInteraction],
+        [persistInteraction, scheduleAfterUI, uid],
     );
 
     const markDisliked = useCallback(

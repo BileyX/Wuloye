@@ -145,7 +145,41 @@ export const getAllPlaces = async (userLocation = null, radiusMeters = 5000) => 
 export const getPlaceById = async (placeId) => {
   const snap = await db.collection(PLACES_COLLECTION).doc(placeId).get();
   if (!snap.exists) return null;
-  return snap.data();
+  return { ...snap.data(), id: snap.id };
+};
+
+/**
+ * Resolves many place IDs in one pass — catalogue cache first, then a single
+ * Firestore batch read for any IDs missing from the in-process cache.
+ *
+ * @param {string[]} ids
+ * @returns {Promise<Map<string, object>>} id → place document
+ */
+export const getPlacesByIds = async (ids) => {
+  const unique = [...new Set((ids ?? []).filter(Boolean))];
+  const result = new Map();
+  if (unique.length === 0) return result;
+
+  const all = await getAllPlaces();
+  const catalogueById = new Map(all.map((p) => [p.id, p]));
+
+  const missing = [];
+  for (const id of unique) {
+    const hit = catalogueById.get(id);
+    if (hit) result.set(id, hit);
+    else missing.push(id);
+  }
+
+  if (missing.length === 0) return result;
+
+  const refs = missing.map((id) => db.collection(PLACES_COLLECTION).doc(id));
+  const snaps = await db.getAll(...refs);
+  for (const snap of snaps) {
+    if (snap.exists) {
+      result.set(snap.id, { ...snap.data(), id: snap.id });
+    }
+  }
+  return result;
 };
 
 /**
