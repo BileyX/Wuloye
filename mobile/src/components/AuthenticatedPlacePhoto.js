@@ -42,7 +42,7 @@ export default function AuthenticatedPlacePhoto({
     onError,
 }) {
     const path = imagePath ?? relativePath;
-    const uri  = toPlacePhotoAbsoluteUri(path);
+    const uri = toPlacePhotoAbsoluteUri(path);
 
     const [loaded, setLoaded] = useState(false);
     const [failed, setFailed] = useState(false);

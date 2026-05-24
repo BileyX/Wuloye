@@ -20,11 +20,7 @@ import {
 import * as AppleAuthentication from "expo-apple-authentication";
 import * as Crypto from "expo-crypto";
 import { auth } from "../config/firebase";
-import {
-    checkUsernameAvailability,
-    getProfile,
-    updateProfile,
-} from "../api/profileApi";
+import { getProfile } from "../api/profileApi";
 import { unwrapApiData } from "../utils/api";
 import * as authStorage from "../utils/authStorage";
 import { clearFeedCache } from "../utils/feedCache";
@@ -81,79 +77,89 @@ export function AuthProvider({ children }) {
 
     // ── Core profile loader ────────────────────────────────────────────────
 
-    const loadProfileForUser = useCallback(async (firebaseUser, options = {}) => {
-        const { bootstrap = false } = options;
-        if (!firebaseUser) {
-            setProfile(null);
+    const loadProfileForUser = useCallback(
+        async (firebaseUser, options = {}) => {
+            const { bootstrap = false } = options;
+            if (!firebaseUser) {
+                setProfile(null);
+                setProfileError(null);
+                return;
+            }
+
             setProfileError(null);
-            return;
-        }
 
-        setProfileError(null);
+            try {
+                // Ensure authStorage has the latest token before the API call.
+                const tokenPromise = firebaseUser.getIdToken();
+                const token = bootstrap
+                    ? await withTimeout(
+                          tokenPromise,
+                          BOOTSTRAP_TOKEN_TIMEOUT_MS,
+                          "Auth token timed out. Check your connection and try again.",
+                      )
+                    : await tokenPromise;
+                await authStorage.setFirebaseToken(token);
 
-        try {
-            // Ensure authStorage has the latest token before the API call.
-            const tokenPromise = firebaseUser.getIdToken();
-            const token = bootstrap
-                ? await withTimeout(
-                      tokenPromise,
-                      BOOTSTRAP_TOKEN_TIMEOUT_MS,
-                      "Auth token timed out. Check your connection and try again.",
-                  )
-                : await tokenPromise;
-            await authStorage.setFirebaseToken(token);
+                const fetchPromise = fetchBackendProfile(
+                    bootstrap
+                        ? { timeoutMs: BOOTSTRAP_PROFILE_TIMEOUT_MS }
+                        : undefined,
+                );
+                const p = bootstrap
+                    ? withTimeout(
+                          fetchPromise,
+                          BOOTSTRAP_PROFILE_TIMEOUT_MS + 2_000,
+                          "Profile sync timed out. Check that the backend is running and reachable.",
+                      )
+                    : fetchPromise;
 
-            const fetchPromise = fetchBackendProfile(
-                bootstrap ? { timeoutMs: BOOTSTRAP_PROFILE_TIMEOUT_MS } : undefined,
-            );
-            const p = bootstrap
-                ? withTimeout(
-                      fetchPromise,
-                      BOOTSTRAP_PROFILE_TIMEOUT_MS + 2_000,
-                      "Profile sync timed out. Check that the backend is running and reachable.",
-                  )
-                : fetchPromise;
+                const profileDoc = await p;
+                if (profileDoc == null || typeof profileDoc !== "object") {
+                    setProfile(null);
+                    setProfileError(
+                        "Invalid profile response from server. Try again.",
+                    );
+                    return;
+                }
+                setProfile(profileDoc);
+                setProfileError(null);
+            } catch (err) {
+                const httpStatus = err?.response?.status;
 
-            const profileDoc = await p;
-            if (profileDoc == null || typeof profileDoc !== "object") {
+                if (httpStatus === 401) {
+                    // The backend still rejected the token even after the axios
+                    // retry interceptor force-refreshed it. Token is revoked or the
+                    // Firebase project is mis-configured — force sign-out so the
+                    // user is returned to the Login screen cleanly.
+                    if (__DEV__) {
+                        console.warn("[Auth] Persistent 401 — force sign-out.");
+                    }
+                    bootstrapRef.current = {
+                        uid: null,
+                        inFlight: false,
+                        done: false,
+                    };
+                    await authStorage.clearFirebaseToken();
+                    await firebaseSignOut(auth);
+                    // onAuthStateChanged will fire with null; no need to set state here.
+                    return;
+                }
+
+                if (__DEV__) {
+                    console.warn(
+                        "[Auth] GET /api/profile failed:",
+                        err?.message ?? err,
+                    );
+                }
                 setProfile(null);
                 setProfileError(
-                    "Invalid profile response from server. Try again.",
-                );
-                return;
-            }
-            setProfile(profileDoc);
-            setProfileError(null);
-        } catch (err) {
-            const httpStatus = err?.response?.status;
-
-            if (httpStatus === 401) {
-                // The backend still rejected the token even after the axios
-                // retry interceptor force-refreshed it. Token is revoked or the
-                // Firebase project is mis-configured — force sign-out so the
-                // user is returned to the Login screen cleanly.
-                if (__DEV__) {
-                    console.warn("[Auth] Persistent 401 — force sign-out.");
-                }
-                bootstrapRef.current = { uid: null, inFlight: false, done: false };
-                await authStorage.clearFirebaseToken();
-                await firebaseSignOut(auth);
-                // onAuthStateChanged will fire with null; no need to set state here.
-                return;
-            }
-
-            if (__DEV__) {
-                console.warn(
-                    "[Auth] GET /api/profile failed:",
-                    err?.message ?? err,
+                    err?.message ??
+                        "Could not load profile. Check your connection.",
                 );
             }
-            setProfile(null);
-            setProfileError(
-                err?.message ?? "Could not load profile. Check your connection.",
-            );
-        }
-    }, []);
+        },
+        [],
+    );
 
     // ── Auth state listener ────────────────────────────────────────────────
 
@@ -172,9 +178,10 @@ export function AuthProvider({ children }) {
                 );
             }
             setReady(true);
-            setProfileError((prev) =>
-                prev ??
-                "Startup timed out. Check that the backend is running and try again.",
+            setProfileError(
+                (prev) =>
+                    prev ??
+                    "Startup timed out. Check that the backend is running and try again.",
             );
         }, BOOTSTRAP_SAFETY_TIMEOUT_MS);
 
@@ -183,7 +190,11 @@ export function AuthProvider({ children }) {
 
             if (!nextUser) {
                 clearSafetyTimer();
-                bootstrapRef.current = { uid: null, inFlight: false, done: false };
+                bootstrapRef.current = {
+                    uid: null,
+                    inFlight: false,
+                    done: false,
+                };
                 setProfile(null);
                 setProfileError(null);
                 await authStorage.clearFirebaseToken();
@@ -206,7 +217,10 @@ export function AuthProvider({ children }) {
                 setReady(true);
                 return;
             }
-            if (bootstrapRef.current.uid === uid && bootstrapRef.current.inFlight) {
+            if (
+                bootstrapRef.current.uid === uid &&
+                bootstrapRef.current.inFlight
+            ) {
                 return;
             }
 
@@ -274,7 +288,10 @@ export function AuthProvider({ children }) {
             clearFeedCache();
         } catch (err) {
             if (__DEV__) {
-                console.warn("[Auth] refreshProfile failed:", err?.message ?? err);
+                console.warn(
+                    "[Auth] refreshProfile failed:",
+                    err?.message ?? err,
+                );
             }
             setProfileError(err?.message ?? "Could not load profile.");
         }
@@ -297,7 +314,7 @@ export function AuthProvider({ children }) {
         await signInWithEmailAndPassword(auth, email.trim(), password);
     }, []);
 
-    const signUpWithEmail = useCallback(async (email, password, username) => {
+    const signUpWithEmail = useCallback(async (email, password) => {
         const credential = await createUserWithEmailAndPassword(
             auth,
             email.trim(),
@@ -305,22 +322,6 @@ export function AuthProvider({ children }) {
         );
         const token = await credential.user.getIdToken();
         await authStorage.setFirebaseToken(token);
-
-        const rawUser = username?.trim().toLowerCase();
-        if (!rawUser) {
-            return;
-        }
-
-        const availability = await checkUsernameAvailability(rawUser);
-        if (!availability?.available) {
-            const err = new Error(
-                "That username is already taken. Try another.",
-            );
-            err.code = "username_taken";
-            throw err;
-        }
-
-        await updateProfile({ username: rawUser });
     }, []);
 
     const signInWithGoogleIdToken = useCallback(async (idToken) => {
